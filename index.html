@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reels 分析工作台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang TC", "PingFang SC", "Microsoft JhengHei", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    background: #f0f2f5; color: #1f2328; min-height: 100vh;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { margin-bottom: 16px; }
+  header h1 { font-size: 23px; display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 36px; height: 36px; border-radius: 10px; background: #1877F2;
+    color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 18px;
+  }
+  header p { color: #57606a; font-size: 14px; margin-top: 6px; }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tab {
+    padding: 9px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+    border: 1px solid #d0d7de; border-radius: 20px; background: #fff; color: #57606a;
+  }
+  .tab.active { background: #1877F2; color: #fff; border-color: #1877F2; }
+
+  .panel { display: none; }
+  .panel.show { display: block; }
+
+  .card {
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 14px;
+    padding: 18px 20px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(16,24,40,.05);
+  }
+  .card h2 { font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .input-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .input-row input[type=text], .input-row input[type=url] {
+    flex: 1 1 300px; padding: 11px 14px; font-size: 14px;
+    border: 1.5px solid #d0d7de; border-radius: 10px; outline: none; min-width: 0;
+  }
+  .input-row input:focus { border-color: #1877F2; }
+  textarea {
+    width: 100%; padding: 11px 14px; font-size: 14px; border: 1.5px solid #d0d7de;
+    border-radius: 10px; outline: none; resize: vertical; font-family: inherit;
+  }
+  textarea:focus { border-color: #1877F2; }
+  select {
+    padding: 11px 10px; font-size: 14px; border: 1.5px solid #d0d7de;
+    border-radius: 10px; background: #fff; outline: none;
+  }
+  button.primary {
+    background: #1877F2; color: #fff; border: none; border-radius: 10px;
+    padding: 11px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button.primary:hover { background: #0e66d1; }
+  button.primary:disabled { background: #9ec5f5; cursor: not-allowed; }
+  button.ghost {
+    background: #fff; color: #374151; border: 1.5px solid #d0d7de; border-radius: 10px;
+    padding: 10px 16px; font-size: 14px; cursor: pointer;
+  }
+  button.ghost:hover { background: #f6f8fa; }
+  .hint { color: #57606a; font-size: 12.5px; margin-top: 8px; line-height: 1.7; }
+  .check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-top: 10px; }
+  .check-row input { width: 16px; height: 16px; }
+
+  .cookies-box { margin-top: 10px; padding: 10px 12px; border: 1px dashed #d0d7de; border-radius: 10px; background: #fafbfc; }
+  .cookies-box .status { font-size: 13px; color: #57606a; margin-top: 6px; }
+  .cookies-box .status.ok { color: #16a34a; }
+
+  .progress-area { display: none; }
+  .progress-area.show { display: block; }
+  .bar-bg { height: 10px; background: #e8ecf0; border-radius: 6px; overflow: hidden; margin-top: 8px; }
+  .bar { height: 100%; width: 0%; background: #1877F2; border-radius: 6px; transition: width .4s; }
+  .msg { font-size: 14px; color: #374151; margin-top: 8px; }
+  .log-box {
+    margin-top: 10px; max-height: 200px; overflow-y: auto; background: #0f172a; color: #dbeafe;
+    border-radius: 10px; padding: 10px 12px; font-size: 12px; font-family: ui-monospace, Menlo, monospace;
+    line-height: 1.7;
+  }
+  .log-box .line { white-space: pre-wrap; word-break: break-all; }
+
+  .error-box {
+    display: none; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+    border-radius: 10px; padding: 12px 14px; font-size: 14px; margin-bottom: 14px;
+  }
+  .error-box.show { display: block; }
+  .warn-box {
+    display: none; background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+    border-radius: 10px; padding: 12px 14px; font-size: 14px; margin-top: 10px;
+  }
+  .warn-box.show { display: block; }
+
+  .result-area { display: none; }
+  .result-area.show { display: block; }
+  .kv { display: grid; grid-template-columns: 96px 1fr; gap: 8px 14px; font-size: 14px; }
+  .kv dt { color: #57606a; }
+  .kv dd { word-break: break-word; }
+  .desc {
+    font-size: 14px; line-height: 1.7; background: #f7f8fa; border: 1px solid #eaeef2;
+    border-radius: 10px; padding: 12px 14px; margin-top: 10px; white-space: pre-wrap;
+  }
+  .dl-btn {
+    display: inline-block; background: #22c55e; color: #fff; text-decoration: none;
+    border-radius: 10px; padding: 11px 20px; font-size: 14px; font-weight: 600;
+  }
+  .dl-btn:hover { background: #16a34a; }
+  .dl-btn.blue { background: #1877F2; }
+  .dl-btn.blue:hover { background: #0e66d1; }
+  .dl-btn.green { background: #16a34a; }
+  .dl-btn.green:hover { background: #12803a; }
+  .transcript { font-size: 15px; line-height: 1.9; white-space: pre-wrap; }
+  .seg { padding: 8px 10px; border-radius: 8px; margin-bottom: 4px; }
+  .seg:nth-child(odd) { background: #f7f8fa; }
+  .seg .t { color: #1877F2; font-size: 12px; margin-right: 8px; font-variant-numeric: tabular-nums; }
+  .empty { color: #9ca3af; font-size: 14px; }
+
+  .tbl-wrap { overflow-x: auto; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 760px; }
+  table.data th {
+    background: #eef1f5; text-align: left; padding: 8px 8px; border-bottom: 1px solid #d0d7de;
+    white-space: nowrap; position: sticky; top: 0;
+  }
+  table.data td { padding: 7px 8px; border-bottom: 1px solid #eaeef2; vertical-align: top; word-break: break-word; }
+  table.data tr:hover td { background: #f7f8fa; }
+  .cell-title { max-width: 220px; }
+  .cell-cap { max-width: 260px; }
+  .cell-tr { max-width: 380px; }
+  .expand { color: #1877F2; cursor: pointer; font-size: 12.5px; }
+  .expand:hover { text-decoration: underline; }
+  .ok { color: #16a34a; }
+  .fail { color: #dc2626; }
+  .badge {
+    display: inline-block; font-size: 12px; background: #e7f0fe; color: #1877F2;
+    border-radius: 20px; padding: 2px 10px; margin-left: 6px;
+  }
+  footer { color: #8b949e; font-size: 12px; line-height: 1.8; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="logo">▶</span> Reels 分析工作台</h1>
+    <p>单条分析：贴一条 Reels/影片链接，下载并识别文案；批量分析：贴主页或多条链接，逐条编号、下载、识别、抓指标与评论，导出 Excel。</p>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="single">单条分析</div>
+    <div class="tab" data-tab="batch">批量分析</div>
+  </div>
+
+  <!-- ============ 单条分析 ============ -->
+  <div class="panel show" id="panel-single">
+    <div class="card">
+      <div class="input-row">
+        <input type="text" id="url" placeholder="貼上連結，例如 https://www.facebook.com/reel/1234567890 或 /videos/…">
+        <select id="model">
+          <option value="tiny">模型 tiny（最快）</option>
+          <option value="base">模型 base</option>
+          <option value="small" selected>模型 small（推薦）</option>
+          <option value="medium">模型 medium（更準）</option>
+          <option value="large-v3">模型 large-v3（最準、最慢）</option>
+        </select>
+        <button class="primary" id="go">開始分析</button>
+      </div>
+      <div class="hint">公開影片可直接下載；首次識別會下載語音模型（small 約 460MB），之後很快。</div>
+    </div>
+    <div class="error-box" id="err1"></div>
+    <div class="card progress-area" id="prog1">
+      <h2>⏳ 處理中</h2>
+      <div class="bar-bg"><div class="bar" id="bar1"></div></div>
+      <div class="msg" id="pmsg1">準備中…</div>
+    </div>
+    <div class="result-area" id="result1">
+      <div class="card">
+        <h2>📄 影片資訊與發布簡介</h2>
+        <dl class="kv" id="meta1"></dl>
+        <div class="desc" id="desc1" style="display:none;"></div>
+      </div>
+      <div class="card">
+        <h2>⬇️ 下載影片</h2>
+        <p class="empty" id="dl-hint1">下載完成後，點下方按鈕保存到電腦。</p>
+        <a class="dl-btn" id="dl1" href="#" download style="display:none;">下載 MP4 影片</a>
+      </div>
+      <div class="card">
+        <h2>🗣 影片口播文案<span class="badge" id="lang1"></span></h2>
+        <div class="warn-box" id="warn1"></div>
+        <div class="transcript" id="transcript1"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 批量分析 ============ -->
+  <div class="panel" id="panel-batch">
+    <div class="card">
+      <h2>📋 批量输入</h2>
+      <div class="input-row">
+        <input type="url" id="b-page" placeholder="方式A：Facebook 公共主页链接或主页名，例如 https://www.facebook.com/xxxxx">
+        <input type="number" id="b-limit" min="1" max="300" placeholder="上限(可选)">
+        <select id="b-model">
+          <option value="tiny">模型 tiny（最快）</option>
+          <option value="base">模型 base</option>
+          <option value="small" selected>模型 small（推薦）</option>
+          <option value="medium">模型 medium（更準）</option>
+          <option value="large-v3">模型 large-v3（最準、最慢）</option>
+        </select>
+        <button class="primary" id="b-go">開始批量分析</button>
+      </div>
+      <div class="hint">
+        方式A：填主页地址，自动枚举该主页<b>全部</b>视频（若已用浏览器深度抓取过该主页，直接命中全量缓存；否则先抓公开首屏，可请助手深度抓取后自动缓存全量）。<b>需要先上传 cookies</b>。可用上方的「上限」控制抓取条数，不填则全部抓取。<br>
+        方式B（无需登录）：下方文本框直接粘贴多条视频链接，每行一条，跳过枚举直接批量处理。
+      </div>
+      <textarea id="b-urls" rows="3" placeholder="方式B：每行粘贴一条 Facebook 视频/Reels 链接（可留空，只用方式A时）"></textarea>
+      <div class="cookies-box">
+        <button class="primary" id="b-fb-login" style="padding:9px 20px;">🔑 登录 Facebook</button>
+        <button class="ghost" id="b-fb-adv" style="margin-left:8px;">高级：上传 cookies</button>
+        <div class="status" id="b-fb-status">正在检查登录状态…</div>
+        <div id="b-fb-adv-box" style="display:none; margin-top:8px;">
+          <input type="file" id="b-cookies-file" accept=".txt" style="display:none;">
+          <button class="ghost" id="b-cookies-btn">上傳 cookies（Netscape 格式）</button>
+          <button class="ghost" id="b-cookies-clear" style="display:none; margin-left:8px;">移除 cookies</button>
+        </div>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="b-comments" checked>
+        <label for="b-comments">抓取评论内容（移动端评论通道，尽量抓取；评论<b>数量</b>始终记录）</label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="b-skip">
+        <label for="b-skip">跳過語音識別（只下載 + 抓數據，速度快很多）</label>
+      </div>
+    </div>
+    <div class="error-box" id="err2"></div>
+    <div class="card progress-area" id="prog2">
+      <h2>⏳ 批量處理中 <span class="badge" id="b-progress-label"></span></h2>
+      <div class="bar-bg"><div class="bar" id="bar2"></div></div>
+      <div class="msg" id="pmsg2">準備中…</div>
+      <div class="log-box" id="blog"></div>
+    </div>
+    <div class="result-area" id="result2">
+      <div class="card">
+        <h2>📊 批量結果<span class="badge" id="b-summary-label"></span></h2>
+        <div style="margin: 4px 0 12px;">
+          <a class="dl-btn blue" id="b-export" href="#" style="display:none;">導出 Excel（按編號分析）</a>
+          <a class="dl-btn green" id="b-export-videos" href="#" style="display:none; margin-left:8px;">打包下載全部視頻 (zip)</a>
+        </div>
+        <div class="filter-row" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+          <input type="text" id="b-q" placeholder="🔍 搜索标题/文案/转写…" style="flex:1; min-width:180px; padding:7px 10px; border:1px solid #d0d7de; border-radius:6px;">
+          <select id="b-lang" style="padding:7px 10px; border:1px solid #d0d7de; border-radius:6px;">
+            <option value="">全部语言</option>
+            <option value="zh">中文</option>
+            <option value="en">英文</option>
+            <option value="">其他</option>
+          </select>
+          <select id="b-status-filter" style="padding:7px 10px; border:1px solid #d0d7de; border-radius:6px;">
+            <option value="">全部状态</option>
+            <option value="成功">成功</option>
+            <option value="失败">失败</option>
+          </select>
+          <span id="b-count" style="align-self:center; color:#57606a; font-size:13px;"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table class="data" id="b-table">
+            <thead>
+              <tr>
+                <th data-key="no">編號</th>
+                <th data-key="title">標題/簡介</th>
+                <th data-key="upload_date">發布時間</th>
+                <th data-key="duration">時長</th>
+                <th data-key="views">觀看 <span class="th-arrow"></span></th>
+                <th data-key="likes">點讚 <span class="th-arrow"></span></th>
+                <th data-key="comments_count">評論</th>
+                <th data-key="status">狀態</th>
+                <th>下載</th>
+                <th data-key="transcript">口播文案</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="warn-box" id="b-warn"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    提示：本工具僅用於分析公開內容。抓取數據可能違反 Facebook 服務條款，請自行評估風險。<br>
+    影片保存在 reels-studio/downloads；導出的 Excel 保存在 reels-studio/exports。
+  </footer>
+</div>
+
+<script>
+(function () {
+  /* ---------- 通用 ---------- */
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString('en-US'); }
+  function fmtDur(sec) {
+    if (sec == null || isNaN(sec)) return '—';
+    var m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  function stopTimer(t) { if (t) { clearInterval(t); } }
+  var timers = { s: null, b: null };
+
+  /* ---------- Tabs ---------- */
+  document.querySelectorAll('.tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      var name = tab.getAttribute('data-tab');
+      document.getElementById('panel-single').classList.toggle('show', name === 'single');
+      document.getElementById('panel-batch').classList.toggle('show', name === 'batch');
+    });
+  });
+
+  /* ---------- 单条 ---------- */
+  var go = document.getElementById('go');
+  var urlInput = document.getElementById('url');
+  var modelSel = document.getElementById('model');
+  var err1 = document.getElementById('err1');
+  var prog1 = document.getElementById('prog1');
+  var bar1 = document.getElementById('bar1');
+  var pmsg1 = document.getElementById('pmsg1');
+  var result1 = document.getElementById('result1');
+
+  function showErr(box, msg) { box.textContent = msg; box.classList.add('show'); }
+  function clearErr(box) { box.classList.remove('show'); }
+
+  go.addEventListener('click', function () {
+    var url = urlInput.value.trim();
+    if (!url) { showErr(err1, '請先貼上 Facebook 影片連結。'); return; }
+    clearErr(err1);
+    go.disabled = true;
+    result1.classList.remove('show');
+    bar1.style.width = '0%';
+    pmsg1.textContent = '正在提交…';
+    prog1.classList.add('show');
+
+    fetch('/api/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, model: modelSel.value })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) { stopTimer(timers.s); prog1.classList.remove('show'); showErr(err1, d.error); go.disabled = false; return; }
+      pmsg1.textContent = '已加入隊列，開始處理…';
+      timers.s = setInterval(function () {
+        fetch('/api/status/' + d.job_id).then(function (r) { return r.json(); }).then(function (j) {
+          if (j.error && !j.status) { stopTimer(timers.s); prog1.classList.remove('show'); showErr(err1, j.error); go.disabled = false; return; }
+          pmsg1.textContent = j.message || '';
+          bar1.style.width = (j.percent || 0) + '%';
+          if (j.status === 'done') {
+            stopTimer(timers.s); prog1.classList.remove('show');
+            renderSingle(j.result); result1.classList.add('show'); go.disabled = false;
+          } else if (j.status === 'error') {
+            stopTimer(timers.s); prog1.classList.remove('show');
+            showErr(err1, '分析失敗：' + (j.error || '未知錯誤')); go.disabled = false;
+          }
+        }).catch(function () {});
+      }, 2000);
+    }).catch(function () {
+      stopTimer(timers.s); prog1.classList.remove('show');
+      showErr(err1, '無法連接到本地服務，請確認服務已啟動。'); go.disabled = false;
+    });
+  });
+  urlInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') go.click(); });
+
+  function renderSingle(r) {
+    var m = r.meta || {};
+    document.getElementById('meta1').innerHTML =
+      '<dt>標題</dt><dd>' + esc(m.title || '—') + '</dd>' +
+      '<dt>發布者</dt><dd>' + esc(m.uploader || '—') + '</dd>' +
+      '<dt>發布日期</dt><dd>' + esc((m.upload_date || '—').replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')) + '</dd>' +
+      '<dt>時長</dt><dd>' + esc(fmtDur(m.duration)) + '</dd>' +
+      '<dt>觀看數</dt><dd>' + esc(fmtNum(m.view_count)) + '</dd>';
+    var desc = document.getElementById('desc1');
+    if (m.description) { desc.style.display = 'block'; desc.textContent = m.description; }
+    else { desc.style.display = 'none'; }
+    var dl = document.getElementById('dl1');
+    if (r.download_url) { dl.href = r.download_url; dl.style.display = 'inline-block'; }
+    document.getElementById('lang1').textContent = r.language ? '語言：' + r.language : '';
+    var warn = document.getElementById('warn1');
+    if (r.warning) { warn.textContent = '⚠ ' + r.warning; warn.classList.add('show'); }
+    else { warn.classList.remove('show'); }
+    document.getElementById('transcript1').textContent = r.transcript || '未能識別到語音內容（影片可能無人聲，或識別失敗）。';
+  }
+
+  /* ---------- Facebook 登录 ---------- */
+  var fbStatus = document.getElementById('b-fb-status');
+  var fbLogin = document.getElementById('b-fb-login');
+  var fbAdv = document.getElementById('b-fb-adv');
+  var fbAdvBox = document.getElementById('b-fb-adv-box');
+  var cookiesFile = document.getElementById('b-cookies-file');
+  var cookiesClear = document.getElementById('b-cookies-clear');
+  var loginTimer = null;
+
+  function fbStatusUI(d) {
+    var cls = '';
+    if (d.status === 'logged_in') { cls = 'ok'; fbLogin.disabled = false; }
+    else if (d.status === 'pending') { cls = ''; fbLogin.disabled = true; }
+    else { cls = 'err'; fbLogin.disabled = false; }
+    fbStatus.textContent = (d.status === 'logged_in' ? '✓ ' : '') + (d.message || '');
+    fbStatus.className = 'status' + (cls ? ' ' + cls : '');
+    if (d.status === 'pending') {
+      clearInterval(loginTimer);
+      loginTimer = setInterval(function () {
+        fetch('/api/login_status').then(function (r) { return r.json(); }).then(function (d2) {
+          fbStatusUI(d2);
+          if (d2.status === 'logged_in' || d2.status === 'error') clearInterval(loginTimer);
+        });
+      }, 3000);
+    }
+  }
+
+  fetch('/api/login_status').then(function (r) { return r.json(); }).then(fbStatusUI).catch(function () {
+    fbStatus.textContent = '无法连接服务，请确认服务已启动';
+  });
+
+  fbLogin.addEventListener('click', function () {
+    fetch('/api/facebook_login', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.ok) { fbStatus.textContent = '正在打开 Facebook 登录窗口…'; fbLogin.disabled = true; fbStatusUI({ status: 'pending', message: '请在弹出窗口完成登录' }); }
+        else { fbStatus.textContent = d.error || '启动登录失败'; fbStatus.classList.add('err'); }
+      });
+  });
+
+  fbAdv.addEventListener('click', function () {
+    fbAdvBox.style.display = fbAdvBox.style.display === 'none' ? 'block' : 'none';
+  });
+  document.getElementById('b-cookies-btn').addEventListener('click', function () { cookiesFile.click(); });
+  cookiesFile.addEventListener('change', function () {
+    if (!cookiesFile.files.length) return;
+    var fd = new FormData();
+    fd.append('file', cookiesFile.files[0]);
+    fetch('/api/upload_cookies', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.ok) {
+          fbStatus.textContent = '✓ 已上传 cookies（' + (d.size || 0) + ' 字节）';
+          fbStatus.className = 'status ok';
+          cookiesClear.style.display = 'inline-block';
+        } else { fbStatus.textContent = '上传失败：' + (d.error || ''); fbStatus.className = 'status err'; }
+      });
+  });
+  cookiesClear.addEventListener('click', function () {
+    fetch('/api/upload_cookies', { method: 'DELETE' }).then(function () {
+      fbStatus.textContent = '已移除 cookies。';
+      fbStatus.className = 'status';
+      cookiesClear.style.display = 'none';
+    });
+  });
+
+  /* ---------- 批量 ---------- */
+  var bGo = document.getElementById('b-go');
+  var bPage = document.getElementById('b-page');
+  var bUrls = document.getElementById('b-urls');
+  var bModel = document.getElementById('b-model');
+  var bComments = document.getElementById('b-comments');
+  var bSkip = document.getElementById('b-skip');
+  var bLimit = document.getElementById('b-limit');
+  var bExportVideos = document.getElementById('b-export-videos');
+  var err2 = document.getElementById('err2');
+  var prog2 = document.getElementById('prog2');
+  var bar2 = document.getElementById('bar2');
+  var pmsg2 = document.getElementById('pmsg2');
+  var blog = document.getElementById('blog');
+  var result2 = document.getElementById('result2');
+  var bLabel = document.getElementById('b-progress-label');
+  var bSummary = document.getElementById('b-summary-label');
+  var bExport = document.getElementById('b-export');
+  var bWarn = document.getElementById('b-warn');
+
+  function addLog(j) {
+    var lines = (j.log || []);
+    blog.innerHTML = lines.map(function (l) { return '<div class="line">' + esc(l) + '</div>'; }).join('');
+    blog.scrollTop = blog.scrollHeight;
+  }
+
+  bGo.addEventListener('click', function () {
+    var page = bPage.value.trim();
+    var urls = bUrls.value.trim();
+    if (!page && !urls) { showErr(err2, '請填寫主頁地址，或至少粘貼一條視頻鏈接。'); return; }
+    clearErr(err2);
+    bGo.disabled = true;
+    result2.classList.remove('show');
+    bar2.style.width = '0%';
+    pmsg2.textContent = '正在提交…';
+    blog.innerHTML = '';
+    prog2.classList.add('show');
+
+    var body = { model: bModel.value, comments: bComments.checked, skip_transcribe: bSkip.checked, mode: 'urls', urls: urls };
+    if (page) {
+      body = { model: bModel.value, comments: bComments.checked, skip_transcribe: bSkip.checked, mode: 'page', page: page };
+      var lim = parseInt(bLimit.value, 10);
+      if (lim > 0) { body.limit = lim; }
+    }
+
+    fetch('/api/analyze_batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, d.error); bGo.disabled = false; return; }
+      timers.b = setInterval(function () {
+        fetch('/api/status/' + d.job_id).then(function (r) { return r.json(); }).then(function (j) {
+          if (j.error && !j.status) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, j.error); bGo.disabled = false; return; }
+          pmsg2.textContent = j.message || '';
+          bar2.style.width = (j.percent || 0) + '%';
+          if (j.total) {
+            bLabel.textContent = j.current ? ('第 ' + j.current.no + '/' + j.total + ' 條') : ('共 ' + j.total + ' 條');
+          }
+          if (j.log) addLog(j);
+          if (j.status === 'done') {
+            stopTimer(timers.b);
+            fetch('/api/page_result/' + d.job_id).then(function (r) { return r.json(); }).then(function (res) {
+              if (res.error) { prog2.classList.remove('show'); showErr(err2, res.error); bGo.disabled = false; return; }
+              renderBatch(res, d.job_id);
+              prog2.classList.remove('show');
+              result2.classList.add('show');
+              bGo.disabled = false;
+            });
+          } else if (j.status === 'error') {
+            stopTimer(timers.b); prog2.classList.remove('show');
+            showErr(err2, '批量分析失敗：' + (j.error || '未知錯誤'));
+            if (j.log) addLog(j);
+            bGo.disabled = false;
+          }
+        }).catch(function () {});
+      }, 2500);
+    }).catch(function () {
+      stopTimer(timers.b); prog2.classList.remove('show');
+      showErr(err2, '無法連接到本地服務，請確認服務已啟動。'); bGo.disabled = false;
+    });
+  });
+
+  /* ---------- 批量结果：排序 + 筛选 ---------- */
+  var bQ = document.getElementById('b-q');
+  var bLang = document.getElementById('b-lang');
+  var bStatusF = document.getElementById('b-status-filter');
+  var bCount = document.getElementById('b-count');
+  var bState = { vids: [], sortKey: 'views', sortDir: -1, q: '', lang: '', st: '' };
+
+  function cmpVal(v, key) {
+    if (key === 'no') return v.no || 0;
+    if (key === 'title') return (v.title || v.caption || '').toLowerCase();
+    if (key === 'upload_date') return v.upload_date || '';
+    if (key === 'duration') return v.duration || 0;
+    if (key === 'views') return v.views || 0;
+    if (key === 'likes') return v.likes || 0;
+    if (key === 'comments_count') return v.comments_count || 0;
+    if (key === 'status') return v.status || '';
+    if (key === 'transcript') return v.transcript || '';
+    return '';
+  }
+
+  function drawBatchTable() {
+    var tbody = document.querySelector('#b-table tbody');
+    tbody.innerHTML = '';
+    var q = bState.q.toLowerCase();
+    var rows = bState.vids.filter(function (v) {
+      if (bState.lang && (v.language || '') !== bState.lang) return false;
+      if (bState.st) {
+        var ok = v.status === '成功';
+        if (bState.st === '成功' && !ok) return false;
+        if (bState.st === '失败' && ok) return false;
+      }
+      if (!q) return true;
+      var hay = ((v.title || '') + ' ' + (v.caption || '') + ' ' + (v.transcript || '')).toLowerCase();
+      return hay.indexOf(q) !== -1;
+    });
+    rows.sort(function (a, b) {
+      var av = cmpVal(a, bState.sortKey), bv = cmpVal(b, bState.sortKey);
+      var r = (typeof av === 'string' ? av.localeCompare(bv) : av - bv);
+      return r * bState.sortDir;
+    });
+    bCount.textContent = '顯示 ' + rows.length + ' / ' + bState.vids.length + ' 條';
+    rows.forEach(function (v) {
+      var tr = document.createElement('tr');
+      var ok = v.status === '成功';
+      var title = v.title || v.caption || '';
+      var dl = v.download_url
+        ? '<a href="' + esc(v.download_url) + '" download style="color:#1877F2;">下載</a>'
+        : '—';
+      var trTxt = v.transcript ? esc(v.transcript) : '<span class="empty">（無）</span>';
+      var trCell = '<div class="cell-tr">' + trTxt +
+        (v.warning ? '<div class="warn-box show">⚠ ' + esc(v.warning) + '</div>' : '') + '</div>';
+      tr.innerHTML =
+        '<td>' + v.no + '</td>' +
+        '<td><div class="cell-title">' + esc(title.slice(0, 120)) + '</div></td>' +
+        '<td>' + esc(v.upload_date || v.publish_time || '—') + '</td>' +
+        '<td>' + fmtDur(v.duration) + '</td>' +
+        '<td>' + fmtNum(v.views) + '</td>' +
+        '<td>' + fmtNum(v.likes) + '</td>' +
+        '<td>' + fmtNum(v.comments_count) + '</td>' +
+        '<td class="' + (ok ? 'ok' : 'fail') + '">' + esc(ok ? '成功' : String(v.status || '').slice(0, 40)) + '</td>' +
+        '<td>' + dl + '</td>' +
+        '<td>' + trCell + '</td>';
+      tbody.appendChild(tr);
+    });
+  }
+
+  function bindTableSort() {
+    var ths = document.querySelectorAll('#b-table thead th');
+    ths.forEach(function (th) {
+      var key = th.getAttribute('data-key');
+      if (!key) return;
+      th.style.cursor = 'pointer';
+      th.title = '点击排序';
+      th.addEventListener('click', function () {
+        if (bState.sortKey === key) { bState.sortDir = -bState.sortDir; }
+        else { bState.sortKey = key; bState.sortDir = (key === 'views' || key === 'likes' || key === 'comments_count' || key === 'duration' || key === 'no') ? -1 : 1; }
+        ths.forEach(function (t) { t.querySelector('.th-arrow').textContent = ''; });
+        var arrow = th.querySelector('.th-arrow');
+        if (arrow) arrow.textContent = bState.sortDir === 1 ? ' ▲' : ' ▼';
+        drawBatchTable();
+      });
+    });
+  }
+  bindTableSort();
+  bQ.addEventListener('input', function () { bState.q = bQ.value; drawBatchTable(); });
+  bLang.addEventListener('change', function () { bState.lang = bLang.value; drawBatchTable(); });
+  bStatusF.addEventListener('change', function () { bState.st = bStatusF.value; drawBatchTable(); });
+
+  function renderBatch(res, jobId) {
+    var vids = res.videos || [];
+    var s = res.summary || {};
+    bSummary.textContent = '成功 ' + (s.success ?? 0) + '/' + (s.total ?? vids.length) +
+      ' · 觀看合計 ' + fmtNum(s.views_sum) + ' · 點讚合計 ' + fmtNum(s.likes_sum);
+    bState.vids = vids;
+    drawBatchTable();
+    if (res.comments && res.comments.length) {
+      bWarn.textContent = '已抓取評論 ' + res.comments.length + ' 條（詳見導出的 Excel「評論明細」表）。';
+      bWarn.classList.add('show');
+    } else {
+      bWarn.textContent = '未抓到評論內容：可能需要登錄 cookies，或受反爬限制；評論數量見表格「評論」列。';
+      bWarn.classList.add('show');
+    }
+    bExport.href = '/api/export/' + jobId;
+    bExport.style.display = 'inline-block';
+    bExportVideos.href = '/api/export_videos/' + jobId;
+    bExportVideos.style.display = 'inline-block';
+  }
+})();
+</script>
+</body>
+</html>
