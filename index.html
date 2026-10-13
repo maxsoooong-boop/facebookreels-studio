@@ -216,6 +216,9 @@
         </select>
         <button class="primary" id="b-go">開始批量分析</button>
       </div>
+      <div class="input-row" style="margin-top:8px;">
+        <button class="ghost scan-btn" id="b-scan">⚡ 深度抓取全部视频（粘贴主页 → 自动滚动抓全量 → 自动开始分析）</button>
+      </div>
       <div class="hint">
         方式A：填主页地址，自动枚举该主页<b>全部</b>视频（若已用浏览器深度抓取过该主页，直接命中全量缓存；否则先抓公开首屏，可请助手深度抓取后自动缓存全量）。<b>需要先上传 cookies</b>。可用上方的「上限」控制抓取条数，不填则全部抓取。<br>
         方式B（无需登录）：下方文本框直接粘贴多条视频链接，每行一条，跳过枚举直接批量处理。
@@ -256,6 +259,7 @@
         <h2>📊 批量結果<span class="badge" id="b-summary-label"></span></h2>
         <div style="margin: 4px 0 12px;">
           <a class="dl-btn blue" id="b-export" href="#" style="display:none;">導出 Excel（按編號分析）</a>
+          <a class="dl-btn green" id="b-export-vid" href="#" style="display:none;">📦 打包下載全部視頻（高清 zip）</a>
         </div>
         <div class="filter-row" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
           <input type="text" id="b-q" placeholder="🔍 搜索标题/文案/转写…" style="flex:1; min-width:180px; padding:7px 10px; border:1px solid #d0d7de; border-radius:6px;">
@@ -506,6 +510,7 @@
 
   /* ---------- 批量 ---------- */
   var bGo = document.getElementById('b-go');
+  var bScan = document.getElementById('b-scan');
   var bPage = document.getElementById('b-page');
   var bUrls = document.getElementById('b-urls');
   var bModel = document.getElementById('b-model');
@@ -522,6 +527,7 @@
   var bLabel = document.getElementById('b-progress-label');
   var bSummary = document.getElementById('b-summary-label');
   var bExport = document.getElementById('b-export');
+  var bExportVid = document.getElementById('b-export-vid');
   var bWarn = document.getElementById('b-warn');
 
   function addLog(j) {
@@ -530,12 +536,10 @@
     blog.scrollTop = blog.scrollHeight;
   }
 
-  bGo.addEventListener('click', function () {
-    var page = bPage.value.trim();
-    var urls = bUrls.value.trim();
-    if (!page && !urls) { showErr(err2, '請填寫主頁地址，或至少粘貼一條視頻鏈接。'); return; }
+  function startBatch(page, urls) {
     clearErr(err2);
     bGo.disabled = true;
+    bScan.disabled = true;
     result2.classList.remove('show');
     bar2.style.width = '0%';
     pmsg2.textContent = '正在提交…';
@@ -552,10 +556,10 @@
     fetch('/api/analyze_batch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     }).then(function (r) { return r.json(); }).then(function (d) {
-      if (d.error) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, d.error); bGo.disabled = false; return; }
+      if (d.error) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, d.error); bGo.disabled = false; bScan.disabled = false; return; }
       timers.b = setInterval(function () {
         fetch('/api/status/' + d.job_id).then(function (r) { return r.json(); }).then(function (j) {
-          if (j.error && !j.status) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, j.error); bGo.disabled = false; return; }
+          if (j.error && !j.status) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, j.error); bGo.disabled = false; bScan.disabled = false; return; }
           pmsg2.textContent = j.message || '';
           bar2.style.width = (j.percent || 0) + '%';
           if (j.total) {
@@ -565,23 +569,80 @@
           if (j.status === 'done') {
             stopTimer(timers.b);
             fetch('/api/page_result/' + d.job_id).then(function (r) { return r.json(); }).then(function (res) {
-              if (res.error) { prog2.classList.remove('show'); showErr(err2, res.error); bGo.disabled = false; return; }
+              if (res.error) { prog2.classList.remove('show'); showErr(err2, res.error); bGo.disabled = false; bScan.disabled = false; return; }
               renderBatch(res, d.job_id);
               prog2.classList.remove('show');
               result2.classList.add('show');
               bGo.disabled = false;
+              bScan.disabled = false;
             });
           } else if (j.status === 'error') {
             stopTimer(timers.b); prog2.classList.remove('show');
             showErr(err2, '批量分析失敗：' + (j.error || '未知錯誤'));
             if (j.log) addLog(j);
             bGo.disabled = false;
+            bScan.disabled = false;
           }
         }).catch(function () {});
       }, 2500);
     }).catch(function () {
       stopTimer(timers.b); prog2.classList.remove('show');
-      showErr(err2, '無法連接到本地服務，請確認服務已啟動。'); bGo.disabled = false;
+      showErr(err2, '無法連接到本地服務，請確認服務已啟動。'); bGo.disabled = false; bScan.disabled = false;
+    });
+  }
+
+  bGo.addEventListener('click', function () {
+    var page = bPage.value.trim();
+    var urls = bUrls.value.trim();
+    if (!page && !urls) { showErr(err2, '請填寫主頁地址，或至少粘貼一條視頻鏈接。'); return; }
+    startBatch(page, urls);
+  });
+
+  /* ⚡ 深度抓取任意主页：自动滚动抓全量 URL → 命中缓存 → 自动开始批量分析 */
+  bScan.addEventListener('click', function () {
+    var page = bPage.value.trim();
+    if (!page) { showErr(err2, '請先填寫要抓取的主頁地址。'); return; }
+    if (bUrls.value.trim()) { showErr(err2, '深度抓取只處理主頁模式；請先清空「方式B」多條鏈接框。'); return; }
+    clearErr(err2);
+    bScan.disabled = true;
+    bGo.disabled = true;
+    result2.classList.remove('show');
+    bar2.style.width = '2%';
+    pmsg2.textContent = '正在启动无头浏览器深度抓取…（首次需登录态有效）';
+    blog.innerHTML = '';
+    prog2.classList.add('show');
+    fetch('/api/deep_scan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: page })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, d.error); bScan.disabled = false; bGo.disabled = false; return; }
+      timers.b = setInterval(function () {
+        fetch('/api/status/' + d.scan_id).then(function (r) { return r.json(); }).then(function (j) {
+          pmsg2.textContent = j.message || '';
+          bar2.style.width = (j.percent || 2) + '%';
+          if (j.log) addLog(j);
+          if (j.status === 'done') {
+            stopTimer(timers.b);
+            var n = j.count || 0;
+            if (n > 0) {
+              pmsg2.textContent = '深度抓取完成，共 ' + n + ' 条视频，自动开始批量分析…';
+              addLog({ log: ['深度抓取完成，命中缓存 ' + n + ' 条，自动开始批量分析'] });
+              setTimeout(function () { startBatch(page, ''); }, 800);
+            } else {
+              prog2.classList.remove('show');
+              showErr(err2, '未抓到任何视频（该主页可能没有公开视频，或需要重新登录）。');
+              bScan.disabled = false; bGo.disabled = false;
+            }
+          } else if (j.status === 'error') {
+            stopTimer(timers.b); prog2.classList.remove('show');
+            showErr(err2, '深度抓取失敗：' + (j.message || j.error || '未知錯誤'));
+            if (j.log) addLog(j);
+            bScan.disabled = false; bGo.disabled = false;
+          }
+        }).catch(function () {});
+      }, 2500);
+    }).catch(function () {
+      stopTimer(timers.b); prog2.classList.remove('show');
+      showErr(err2, '無法連接到本地服務，請確認服務已啟動。'); bScan.disabled = false; bGo.disabled = false;
     });
   });
 
@@ -688,10 +749,13 @@
     if (jobId && jobId.indexOf('saved:') === 0) {
       var sp = jobId.slice(6);
       bExport.href = '/api/export_saved/' + encodeURIComponent(sp);
+      bExportVid.href = '/api/export_videos_saved/' + encodeURIComponent(sp);
     } else {
       bExport.href = '/api/export/' + jobId;
+      bExportVid.href = '/api/export_videos/' + jobId;
     }
     bExport.style.display = 'inline-block';
+    bExportVid.style.display = 'inline-block';
   }
 
   // 表格「⬇ 下载」：单条按需下载（后端实时抓直链，不再批量囤 2.2G）

@@ -879,6 +879,30 @@ def analyze_batch():
     return jsonify({"job_id": job_id})
 
 
+@app.post("/api/deep_scan")
+def deep_scan():
+    """深度抓取任意主页的全部视频 URL：子进程调 .venv/bin/python 无头浏览器滚动抓取，
+    写入 pages/<page>_all_urls.txt 缓存后，前端可自动触发批量分析。"""
+    data = request.get_json(silent=True) or {}
+    page = _extract_page_name((data.get("page") or "").strip())
+    if not page:
+        return jsonify({"error": "请填写主页链接或主页名"}), 400
+    scan_id = uuid.uuid4().hex[:12]
+    JOBS[scan_id] = {"id": scan_id, "type": "deep_scan", "status": "running", "page": page,
+                     "message": "正在启动深度抓取…", "percent": 1, "count": None,
+                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _save_job(JOBS[scan_id])
+    venv_py = os.path.join(BASE_DIR, ".venv", "bin", "python")
+    if not os.path.exists(venv_py):
+        return jsonify({"error": "缺少 .venv/bin/python（playwright 环境）"}), 500
+    import subprocess
+    subprocess.Popen(
+        [venv_py, os.path.join(BASE_DIR, "deep_scan_worker.py"), page, COOKIES_FILE, scan_id],
+        cwd=BASE_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return jsonify({"scan_id": scan_id})
+
+
 @app.get("/api/status/<job_id>")
 def status(job_id):
     job = _load_job(job_id)
