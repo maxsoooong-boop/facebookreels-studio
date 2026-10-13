@@ -1,7 +1,8 @@
 #!/bin/bash
-# Reels 分析工作台 - 一键启动
+# Reels 分析工作台 - 一键启动（系统 Python + 用户包目录，不依赖豆包沙箱）
 # 双击本文件即可启动服务，启动后浏览器会自动打开 http://127.0.0.1:8756
 cd "$(dirname "$0")"
+export PYTHONPATH="/Users/mac/Library/Python/3.9/lib/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
 
 # 如果服务已在运行则直接打开
 if curl -s -o /dev/null --max-time 3 http://127.0.0.1:8756/; then
@@ -11,7 +12,7 @@ if curl -s -o /dev/null --max-time 3 http://127.0.0.1:8756/; then
 fi
 
 # 启动服务
-nohup python3 app.py > server.log 2>&1 &
+nohup /usr/bin/python3 app.py > server.log 2>&1 &
 sleep 5
 if curl -s -o /dev/null --max-time 5 http://127.0.0.1:8756/; then
   open "http://127.0.0.1:8756"

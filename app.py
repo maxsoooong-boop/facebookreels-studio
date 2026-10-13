@@ -11,8 +11,9 @@ import re
 import sys
 import time
 import json
-import threading
 import uuid
+import threading
+import multiprocessing
 from datetime import datetime
 
 # 中国大陆访问 HuggingFace 模型仓库较慢/不通，默认走镜像
@@ -20,10 +21,12 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
+TMP_DIR = os.path.join(BASE_DIR, ".tmp")      # 仅转写不保存时的临时视频目录（转写后自动清空）
 EXPORTS_DIR = os.path.join(BASE_DIR, "exports")
 JOBS_DIR = os.path.join(BASE_DIR, "jobs")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
-for _d in (DOWNLOADS_DIR, EXPORTS_DIR, JOBS_DIR):
+for _d in (DOWNLOADS_DIR, EXPORTS_DIR, JOBS_DIR, DATA_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # 把 imageio-ffmpeg 自带的 ffmpeg 加入 PATH，供 yt-dlp 合并音视频使用（如需要）
@@ -82,8 +85,7 @@ def _save_job(job):
 
 
 def _load_job(job_id):
-    if job_id in JOBS:
-        return JOBS[job_id]
+    # 子进程模式：任务在独立进程更新文件，主进程内存可能是旧值 → 文件优先
     fp = os.path.join(JOBS_DIR, job_id + ".json")
     if os.path.exists(fp):
         try:
@@ -91,7 +93,7 @@ def _load_job(job_id):
                 return json.load(f)
         except Exception:
             pass
-    return None
+    return JOBS.get(job_id)
 
 
 # ----------------------------- 工具函数 -----------------------------
@@ -191,7 +193,7 @@ def _fb_fetch(url, timeout=25):
     last = None
     for _ in range(4):
         try:
-            r = cr.get(url, impersonate="chrome", cookies=ck, timeout=timeout)
+            r = cr.get(url, impersonate="chrome", cookies=ck, timeout=(8, 30))
             if r.status_code == 200 and len(r.text) > 50000:
                 return r.text
             last = f"HTTP {r.status_code}, 长度 {len(r.text)}"
@@ -311,7 +313,7 @@ def _download_direct(url, path, job):
     last = None
     for attempt in range(3):
         try:
-            r = cr.get(url, impersonate="chrome", cookies=ck, stream=True, timeout=60,
+            r = cr.get(url, impersonate="chrome", cookies=ck, stream=True, timeout=(8, 60),
                        headers={"Referer": "https://www.facebook.com/"})
             try:
                 if r.status_code != 200:
@@ -376,15 +378,24 @@ def _fetch_post_counts(rec):
         html = _fb_fetch(f"https://www.facebook.com/video.php?v={vid}")
         win = _clean_win(html)
         rcm = re.findall(r'"reaction_count":\{"count":(\d+)\}', win)
-        scm = re.findall(r'"share_count":\{"count":(\d+)\}', win)
-        ccm = re.findall(r'"comments":\{"total_count":(\d+)\}', win)
+        # 分享数：页面有多种结构，全部尝试取最大
+        scm = (re.findall(r'"share_count":\{"count":(\d+)\}', win)
+               + re.findall(r'"reshares":\{"count":(\d+)\}', win)
+               + re.findall(r'"i18n_share_count":"([\d,]+)"', win))
+        # 评论总数：comment_rendering_instance 或顶层 comments 结构
+        ccm = (re.findall(r'"comments":\{"total_count":(\d+)\}', win)
+               + re.findall(r'"comment_count":(\d+)', win)
+               + re.findall(r'"top_level_comment_count":(\d+)', win))
         vcm = re.findall(r'"(?:play_count|video_view_count|view_count)":(\d+)', win)
         if rcm and rec.get("likes") is None:
             rec["likes"] = max(map(int, rcm))
         if scm and rec.get("shares") is None:
-            rec["shares"] = max(map(int, scm))
+            rec["shares"] = max(map(int, [int(s.replace(",", "")) for s in scm]))
         if ccm and rec.get("comments") is None:
             rec["comments"] = max(map(int, ccm))
+        # 打通字段：表格/导出统一用 comments_count
+        if rec.get("comments") is not None:
+            rec["comments_count"] = rec["comments"]
         if vcm and rec.get("views") is None:
             rec["views"] = max(map(int, vcm))
         if not rec.get("publish_time"):
@@ -570,7 +581,11 @@ def _enumerate_page_videos_smart(page, job=None, max_videos=MAX_VIDEOS):
 
 
 def _run_batch_job(job_id, source, model_name, want_comments):
-    job = JOBS[job_id]
+    # 任务运行在独立子进程（multiprocessing），从磁盘恢复 job 状态，与主服务完全隔离
+    job = _load_job(job_id) or {"id": job_id, "type": "batch", "status": "queued", "message": "已加入队列",
+                                "percent": 0, "result": None, "error": None, "model": model_name,
+                                "log": [], "videos": [], "total": None, "current": None,
+                                "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
     def setp(msg, pct=None, log=None):
         job["message"] = msg
@@ -580,6 +595,7 @@ def _run_batch_job(job_id, source, model_name, want_comments):
             job["log"].append(f"{datetime.now().strftime('%H:%M:%S')} {log}")
             if len(job["log"]) > 300:
                 job["log"] = job["log"][-300:]
+        _save_job(job)  # 子进程模式：每次状态变更落盘，主服务据此轮询
 
     try:
         videos = source.get("videos") or []
@@ -605,7 +621,7 @@ def _run_batch_job(job_id, source, model_name, want_comments):
             no = i + 1
             url = v["url"] if isinstance(v, dict) else v
             job["current"] = {"no": no, "total": total, "url": url}
-            setp(f"第 {no}/{total} 条：下载并识别中…", 3 + int(no / total * 70), f"开始处理 #{no}: {url[:80]}")
+            setp(f"第 {no}/{total} 条：抓取数据中…", 3 + int(no / total * 70), f"开始处理 #{no}: {url[:80]}")
             rec = {
                 "no": no, "url": url,
                 "video_id": v.get("video_id", "") if isinstance(v, dict) else "",
@@ -630,24 +646,35 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                 _fetch_post_counts(rec)  # 优先从帖子页补互动数+直链+文案+发布时间
                 direct = rec.get("direct") or (v.get("direct", "") if isinstance(v, dict) else "")
                 dl_file = None
-                if direct:
-                    setp(f"第 {no}/{total} 条：直链下载中…", None, f"#{no} 直链下载")
+                save_video = not bool(source.get("skip_download"))    # 用户要保存视频到本地
+                need_trans = not bool(source.get("skip_transcribe"))  # 用户要口播文案
+                # 转写必须有本地文件：仅转写不保存时，下载到临时目录，转写后自动删除（不囤 2.2G）
+                if direct and (save_video or need_trans):
+                    setp(f"第 {no}/{total} 条：下载视频中…", None, f"#{no} 下载中（{'保存' if save_video else '临时转写用'}）")
                     vid = rec.get("video_id") or ""
                     if not vid:
                         m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
                         vid = m.group(1) if m else f"video{no}"
-                    dl_path = os.path.join(DOWNLOADS_DIR, vid + ".mp4")
+                    if save_video:
+                        dl_path = os.path.join(DOWNLOADS_DIR, vid + ".mp4")
+                    else:
+                        os.makedirs(TMP_DIR, exist_ok=True)
+                        dl_path = os.path.join(TMP_DIR, vid + ".mp4")
                     try:
                         if not os.path.exists(dl_path):
                             _download_direct(direct, dl_path, job)
-                        rec["file"] = os.path.basename(dl_path)
-                        rec["download_url"] = "/downloads/" + os.path.basename(dl_path)
                         dl_file = dl_path
+                        if save_video:
+                            rec["file"] = os.path.basename(dl_path)
+                            rec["download_url"] = "/downloads/" + os.path.basename(dl_path)
+                        else:
+                            rec["file"] = None
+                            rec["download_url"] = None
                     except Exception as e:
                         rec["warning"] = f"直链下载失败({str(e)[:60]})，改走 yt-dlp"
                         setp(f"第 {no}/{total} 条：直链失败，yt-dlp 下载中…", None, f"#{no} yt-dlp 兜底")
                         dl_file = None
-                if not dl_file:
+                if not dl_file and (save_video or need_trans):
                     with yt_dlp.YoutubeDL(_ytdl_opts(job)) as ydl:
                         info = ydl.extract_info(url, download=True)
                     path = ydl.prepare_filename(info)
@@ -657,9 +684,10 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                         if not cands:
                             raise RuntimeError("文件未找到")
                         path = os.path.join(DOWNLOADS_DIR, cands[0])
-                    rec["file"] = os.path.basename(path)
-                    rec["download_url"] = "/downloads/" + os.path.basename(path)
                     dl_file = path
+                    if save_video:
+                        rec["file"] = os.path.basename(path)
+                        rec["download_url"] = "/downloads/" + os.path.basename(path)
                     rec["title"] = info.get("title") or ""
                     rec["upload_date"] = info.get("upload_date") or ""
                     rec["duration"] = info.get("duration")
@@ -673,11 +701,14 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                     if not rec.get("caption"):
                         rec["caption"] = rec.get("description", "")
 
-                if source.get("skip_transcribe"):
+                if source.get("skip_transcribe") or not dl_file:
                     rec["transcript"] = None
                     rec["language"] = None
                     rec["segments"] = []
-                    rec["warning"] = "已跳过语音识别（仅下载+数据）"
+                    if not dl_file and need_trans:
+                        rec["warning"] = "视频获取失败，无法转写口播文案（数据仍完整）"
+                    elif source.get("skip_transcribe"):
+                        rec["warning"] = "已跳过语音识别（仅下载+数据）"
                 else:
                     setp(f"第 {no}/{total} 条：识别文案中…", 3 + int(no / total * 70) + 15, f"#{no} 转写中")
                     try:
@@ -688,6 +719,13 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                     except Exception as e:
                         rec["transcript"] = None
                         rec["warning"] = f"语音识别失败：{str(e)[:200]}"
+                    finally:
+                        # 仅转写不保存：转写完即删临时视频，不留磁盘负担
+                        if need_trans and not save_video and dl_file and os.path.exists(dl_file):
+                            try:
+                                os.remove(dl_file)
+                            except Exception:
+                                pass
 
                 if want_comments:
                     cdata = _fetch_comments_best_effort(url)
@@ -716,6 +754,8 @@ def _run_batch_job(job_id, source, model_name, want_comments):
         job["result"] = {"videos": results, "comments": comments_all, "summary": summary,
                          "total": total, "model": model_name, "comments_enabled": want_comments,
                          "page": page, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if page:
+            _save_page_result(page, job["result"])
         setp("完成，可导出 Excel", 100, f"完成：成功 {sum(1 for r in results if r['status']=='成功')}/{total}")
         job["status"] = "done"
     except Exception as e:
@@ -812,12 +852,18 @@ def analyze_batch():
             urls = urls[:MAX_VIDEOS]
         source = {"mode": "urls", "videos": urls}
     source["skip_transcribe"] = bool(data.get("skip_transcribe"))
+    source["skip_download"] = bool(data.get("skip_download"))
     job_id = uuid.uuid4().hex[:12]
     JOBS[job_id] = {"id": job_id, "type": "batch", "status": "queued", "message": "已加入队列",
                     "percent": 0, "result": None, "error": None, "model": model,
                     "log": [], "videos": [], "total": None, "current": None,
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    threading.Thread(target=_run_batch_job, args=(job_id, source, model, want_comments), daemon=True).start()
+    _save_job(JOBS[job_id])
+    # 任务跑在独立子进程（fork：系统 Python 上 spawn 不可用，fork 直接继承内存、无需重载）：
+    # 抓取/下载/转写即使崩溃（如底层库段错误）也不影响主服务
+    multiprocessing.get_context("fork").Process(
+        target=_run_batch_job, args=(job_id, source, model, want_comments), daemon=True
+    ).start()
     return jsonify({"job_id": job_id})
 
 
@@ -841,6 +887,133 @@ def page_result(job_id):
     if job.get("status") != "done" or not job.get("result"):
         return jsonify({"status": job.get("status"), "message": job.get("message")}), 202
     return jsonify(job["result"])
+
+
+# ----------------------------- 已保存结果（主页分析自动存档） -----------------------------
+
+def _page_key(page):
+    """主页标识 → 存档文件名。仅接受安全的字母数字与 -_ 字符。"""
+    key = re.sub(r"[^A-Za-z0-9_-]", "_", page or "page")
+    return key or "page"
+
+
+def _save_page_result(page, result):
+    """主页批量分析完成后自动存档到 data/<page>_result.json，下次打开网页可直接加载。"""
+    try:
+        fp = os.path.join(DATA_DIR, _page_key(page) + "_result.json")
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _load_saved_result(page):
+    fp = os.path.join(DATA_DIR, _page_key(page) + "_result.json")
+    if not os.path.exists(fp):
+        return None
+    try:
+        with open(fp, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+@app.get("/api/saved_results")
+def saved_results():
+    """列出 data/ 下所有已存档的主页分析结果。"""
+    items = []
+    try:
+        for fn in os.listdir(DATA_DIR):
+            if not fn.endswith("_result.json"):
+                continue
+            try:
+                with open(os.path.join(DATA_DIR, fn), encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception:
+                continue
+            page = d.get("page") or fn[:-len("_result.json")]
+            items.append({
+                "page": page,
+                "total": d.get("total"),
+                "success": (d.get("summary") or {}).get("success"),
+                "generated_at": d.get("generated_at"),
+                "model": d.get("model"),
+            })
+    except Exception:
+        pass
+    items.sort(key=lambda x: x.get("generated_at") or "", reverse=True)
+    return jsonify(items)
+
+
+@app.get("/api/saved_result/<page>")
+def saved_result(page):
+    d = _load_saved_result(page)
+    if not d:
+        return jsonify({"error": "该主页没有已保存的分析结果"}), 404
+    return jsonify(d)
+
+
+@app.get("/api/export_saved/<page>")
+def export_saved(page):
+    d = _load_saved_result(page)
+    if not d:
+        return jsonify({"error": "该主页没有已保存的分析结果"}), 404
+    out_path = _build_excel(d)
+    if not out_path:
+        return jsonify({"error": "Excel 生成失败"}), 500
+    return send_file(out_path, as_attachment=True, download_name=f"{_page_key(page)}_全量分析.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.get("/api/export_videos_saved/<page>")
+def export_videos_saved(page):
+    """把已保存主页分析中下载过的视频打包成 zip 下载。"""
+    import io as _io
+    import zipfile as _zipfile
+    d = _load_saved_result(page)
+    if not d:
+        return jsonify({"error": "该主页没有已保存的分析结果"}), 404
+    files = []
+    for v in d.get("videos", []):
+        if v.get("file"):
+            p = os.path.join(DOWNLOADS_DIR, v["file"])
+            if os.path.exists(p):
+                files.append((p, f"{v.get('no')}-{os.path.basename(v['file'])}"))
+    if not files:
+        return jsonify({"error": "该主页没有已下载的视频文件"}), 400
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_STORED) as z:
+        for p, name in files:
+            z.write(p, name)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True,
+                     download_name=f"{_page_key(page)}_全部视频_{len(files)}条.zip")
+
+
+@app.post("/api/download_one")
+def download_one():
+    """按需下载单条视频：实时抓直链 → 下载 → 返回本地下载链接。默认不囤视频，需要哪条下哪条。"""
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "缺少视频链接"}), 400
+    try:
+        rec = {"url": url}
+        _fetch_post_counts(rec)
+        direct = rec.get("direct")
+        if not direct:
+            return jsonify({"error": "未找到可下载直链（可能需要有效登录 cookies）"}), 400
+        vid = rec.get("video_id") or ""
+        if not vid:
+            m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
+            vid = m.group(1) if m else "video"
+        dl_path = os.path.join(DOWNLOADS_DIR, vid + ".mp4")
+        if not os.path.exists(dl_path):
+            _download_direct(direct, dl_path, {"id": "one"})
+        return jsonify({"ok": True, "file": "/downloads/" + os.path.basename(dl_path),
+                        "size": os.path.getsize(dl_path) if os.path.exists(dl_path) else 0})
+    except Exception as e:
+        return jsonify({"error": f"下载失败：{str(e)[:150]}"}), 500
 
 
 PW_STATE_FILE = os.path.join(BASE_DIR, "pw_login_state.json")

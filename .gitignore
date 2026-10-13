@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# 主页分析存档（含评论等抓取数据，不入库）
+data/

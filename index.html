@@ -109,6 +109,11 @@
   .dl-btn.blue:hover { background: #0e66d1; }
   .dl-btn.green { background: #16a34a; }
   .dl-btn.green:hover { background: #12803a; }
+  .dl-one {
+    background: #1877F2; color: #fff; border: 0; border-radius: 6px; padding: 4px 10px;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .dl-one:disabled { background: #9ca3af; cursor: wait; }
   .transcript { font-size: 15px; line-height: 1.9; white-space: pre-wrap; }
   .seg { padding: 8px 10px; border-radius: 8px; margin-bottom: 4px; }
   .seg:nth-child(odd) { background: #f7f8fa; }
@@ -192,6 +197,11 @@
 
   <!-- ============ 批量分析 ============ -->
   <div class="panel" id="panel-batch">
+    <div class="card" id="saved-card" style="display:none; border-left:4px solid #1877F2;">
+      <h2>📌 已保存的主页分析（本地存档，打开网页即加载）</h2>
+      <div id="saved-tabs" style="display:flex; gap:8px; flex-wrap:wrap; margin:6px 0;"></div>
+      <div class="hint">分析过的主页会自动存档在 <b>reels-studio/data/</b>，下次打开网页直接显示；点上方标签可切换主页，无需重新抓取。新分析其他主页后，这里会自动多出一个标签。</div>
+    </div>
     <div class="card">
       <h2>📋 批量输入</h2>
       <div class="input-row">
@@ -226,8 +236,12 @@
         <label for="b-comments">抓取评论内容（移动端评论通道，尽量抓取；评论<b>数量</b>始终记录）</label>
       </div>
       <div class="check-row">
-        <input type="checkbox" id="b-skip">
-        <label for="b-skip">跳過語音識別（只下載 + 抓數據，速度快很多）</label>
+        <input type="checkbox" id="b-trans" checked>
+        <label for="b-trans">识别口播文案（临时下载视频转写，转写后自动删除，不占磁盘）</label>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="b-save-vid">
+        <label for="b-save-vid">保存视频到本地（高清 mp4，会占磁盘；不需要可关掉）</label>
       </div>
     </div>
     <div class="error-box" id="err2"></div>
@@ -242,7 +256,6 @@
         <h2>📊 批量結果<span class="badge" id="b-summary-label"></span></h2>
         <div style="margin: 4px 0 12px;">
           <a class="dl-btn blue" id="b-export" href="#" style="display:none;">導出 Excel（按編號分析）</a>
-          <a class="dl-btn green" id="b-export-videos" href="#" style="display:none; margin-left:8px;">打包下載全部視頻 (zip)</a>
         </div>
         <div class="filter-row" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
           <input type="text" id="b-q" placeholder="🔍 搜索标题/文案/转写…" style="flex:1; min-width:180px; padding:7px 10px; border:1px solid #d0d7de; border-radius:6px;">
@@ -418,6 +431,44 @@
     fbStatus.textContent = '无法连接服务，请确认服务已启动';
   });
 
+  /* ---------- 已保存的主页分析：打开网页自动加载 ---------- */
+  var savedCard = document.getElementById('saved-card');
+  var savedTabs = document.getElementById('saved-tabs');
+  var currentSavedPage = null;
+
+  function loadSavedList() {
+    fetch('/api/saved_results').then(function (r) { return r.json(); }).then(function (items) {
+      if (!items || !items.length) return;
+      savedCard.style.display = 'block';
+      savedTabs.innerHTML = '';
+      items.forEach(function (it) {
+        var btn = document.createElement('button');
+        btn.className = 'primary';
+        btn.style.cssText = 'padding:7px 14px; font-size:13px; border-radius:6px; cursor:pointer;';
+        btn.textContent = '🏠 ' + it.page + '（' + (it.total ?? '?') + ' 条 · ' + (it.generated_at || '') + '）';
+        if (currentSavedPage === it.page) { btn.style.outline = '3px solid #1877F2'; }
+        btn.addEventListener('click', function () {
+          currentSavedPage = it.page;
+          loadSavedResult(it.page);
+          savedTabs.querySelectorAll('button').forEach(function (b) { b.style.outline = 'none'; });
+          btn.style.outline = '3px solid #1877F2';
+        });
+        savedTabs.appendChild(btn);
+      });
+      // 自动加载最新的一个（列表已按时间倒序）
+      loadSavedResult(items[0].page);
+    }).catch(function () {});
+  }
+
+  function loadSavedResult(page) {
+    fetch('/api/saved_result/' + encodeURIComponent(page)).then(function (r) { return r.json(); }).then(function (res) {
+      if (res.error) return;
+      result2.classList.add('show');
+      renderBatch(res, 'saved:' + page);
+    }).catch(function () {});
+  }
+  loadSavedList();
+
   fbLogin.addEventListener('click', function () {
     fetch('/api/facebook_login', { method: 'POST' })
       .then(function (r) { return r.json(); })
@@ -459,9 +510,9 @@
   var bUrls = document.getElementById('b-urls');
   var bModel = document.getElementById('b-model');
   var bComments = document.getElementById('b-comments');
-  var bSkip = document.getElementById('b-skip');
+  var bTrans = document.getElementById('b-trans');
+  var bSaveVid = document.getElementById('b-save-vid');
   var bLimit = document.getElementById('b-limit');
-  var bExportVideos = document.getElementById('b-export-videos');
   var err2 = document.getElementById('err2');
   var prog2 = document.getElementById('prog2');
   var bar2 = document.getElementById('bar2');
@@ -491,9 +542,9 @@
     blog.innerHTML = '';
     prog2.classList.add('show');
 
-    var body = { model: bModel.value, comments: bComments.checked, skip_transcribe: bSkip.checked, mode: 'urls', urls: urls };
+    var body = { model: bModel.value, comments: bComments.checked, skip_transcribe: !bTrans.checked, skip_download: !bSaveVid.checked, mode: 'urls', urls: urls };
     if (page) {
-      body = { model: bModel.value, comments: bComments.checked, skip_transcribe: bSkip.checked, mode: 'page', page: page };
+      body = { model: bModel.value, comments: bComments.checked, skip_transcribe: !bTrans.checked, skip_download: !bSaveVid.checked, mode: 'page', page: page };
       var lim = parseInt(bLimit.value, 10);
       if (lim > 0) { body.limit = lim; }
     }
@@ -579,9 +630,7 @@
       var tr = document.createElement('tr');
       var ok = v.status === '成功';
       var title = v.title || v.caption || '';
-      var dl = v.download_url
-        ? '<a href="' + esc(v.download_url) + '" download style="color:#1877F2;">下載</a>'
-        : '—';
+      var dl = '<button class="dl-one" data-url="' + esc(v.url || '') + '" data-vid="' + esc(v.video_id || '') + '">⬇ 下载</button>';
       var trTxt = v.transcript ? esc(v.transcript) : '<span class="empty">（無）</span>';
       var trCell = '<div class="cell-tr">' + trTxt +
         (v.warning ? '<div class="warn-box show">⚠ ' + esc(v.warning) + '</div>' : '') + '</div>';
@@ -636,11 +685,45 @@
       bWarn.textContent = '未抓到評論內容：可能需要登錄 cookies，或受反爬限制；評論數量見表格「評論」列。';
       bWarn.classList.add('show');
     }
-    bExport.href = '/api/export/' + jobId;
+    if (jobId && jobId.indexOf('saved:') === 0) {
+      var sp = jobId.slice(6);
+      bExport.href = '/api/export_saved/' + encodeURIComponent(sp);
+    } else {
+      bExport.href = '/api/export/' + jobId;
+    }
     bExport.style.display = 'inline-block';
-    bExportVideos.href = '/api/export_videos/' + jobId;
-    bExportVideos.style.display = 'inline-block';
   }
+
+  // 表格「⬇ 下载」：单条按需下载（后端实时抓直链，不再批量囤 2.2G）
+  document.getElementById('b-table').addEventListener('click', function (ev) {
+    var btn = ev.target.closest('.dl-one');
+    if (!btn) return;
+    var url = btn.getAttribute('data-url');
+    if (!url) { alert('该条无视频链接'); return; }
+    btn.disabled = true;
+    btn.textContent = '下载中…';
+    fetch('/api/download_one', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: url })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.ok && d.file) {
+        var a = document.createElement('a');
+        a.href = d.file;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        btn.textContent = '✅ 已下载';
+      } else {
+        btn.textContent = '⬇ 重试';
+        btn.disabled = false;
+        alert('下载失败：' + (d.error || '未知错误'));
+      }
+    }).catch(function () {
+      btn.textContent = '⬇ 重试';
+      btn.disabled = false;
+      alert('下载请求失败，请稍后再试');
+    });
+  });
 })();
 </script>
 </body>
