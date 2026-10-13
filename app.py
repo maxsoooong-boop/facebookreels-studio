@@ -756,7 +756,7 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                 done_count += 1
                 job["current"] = {"no": no, "total": total, "url": rec.get("url", "")}
                 setp(f"已完成 {done_count}/{total} 条…", 3 + int(done_count / total * 90), f"#{no} 完成")
-                job["videos"] = list(results)
+                job["videos"] = [r for r in results if r is not None]  # 并发完成乱序，过滤未填位
                 _save_job(job)
                 time.sleep(0.3)  # 轻微放缓，降低 FB 限流概率
 

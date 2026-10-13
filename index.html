@@ -733,7 +733,7 @@
   bStatusF.addEventListener('change', function () { bState.st = bStatusF.value; drawBatchTable(); });
 
   function renderBatch(res, jobId) {
-    var vids = res.videos || [];
+    var vids = (res.videos || []).filter(function (v) { return v; });
     var s = res.summary || {};
     bSummary.textContent = '成功 ' + (s.success ?? 0) + '/' + (s.total ?? vids.length) +
       ' · 觀看合計 ' + fmtNum(s.views_sum) + ' · 點讚合計 ' + fmtNum(s.likes_sum);
