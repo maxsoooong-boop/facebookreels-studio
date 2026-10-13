@@ -580,6 +580,125 @@ def _enumerate_page_videos_smart(page, job=None, max_videos=MAX_VIDEOS):
     return live
 
 
+def _process_one_video(no, total, v, source, model_name, want_comments):
+    """批量任务中单条视频的处理：抓数据 → 下载（保存/临时）→ 转写 → 删临时。
+    运行在并发线程池内：不写 job 状态（避免并发写文件冲突），只返回结果。"""
+    url = v["url"] if isinstance(v, dict) else v
+    rec = {
+        "no": no, "url": url,
+        "video_id": v.get("video_id", "") if isinstance(v, dict) else "",
+        "title": v.get("title", "") if isinstance(v, dict) else "",
+        "caption": v.get("caption", "") if isinstance(v, dict) else "",
+        "post_id": v.get("post_id", "") if isinstance(v, dict) else "",
+        "publish_time": v.get("publish_time") if isinstance(v, dict) else None,
+        "upload_date": _fmt_time(v.get("publish_time")) if isinstance(v, dict) and v.get("publish_time") else "",
+        "likes": v.get("likes") if isinstance(v, dict) else None,
+        "comments_count": v.get("comments") if isinstance(v, dict) else None,
+        "shares": v.get("shares") if isinstance(v, dict) else None,
+        "views": v.get("views") if isinstance(v, dict) else None,
+        "duration": v.get("duration") if isinstance(v, dict) else None,
+        "status": "处理中",
+    }
+    comments = []
+    try:
+        if not rec.get("video_id"):
+            m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
+            if m:
+                rec["video_id"] = m.group(1)
+        _fetch_post_counts(rec)  # 优先从帖子页补互动数+直链+文案+发布时间
+        direct = rec.get("direct") or (v.get("direct", "") if isinstance(v, dict) else "")
+        dl_file = None
+        save_video = not bool(source.get("skip_download"))    # 用户要保存视频到本地
+        need_trans = not bool(source.get("skip_transcribe"))  # 用户要口播文案
+        if direct and (save_video or need_trans):
+            vid = rec.get("video_id") or ""
+            if not vid:
+                m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
+                vid = m.group(1) if m else f"video{no}"
+            if save_video:
+                dl_path = os.path.join(DOWNLOADS_DIR, vid + ".mp4")
+            else:
+                os.makedirs(TMP_DIR, exist_ok=True)
+                dl_path = os.path.join(TMP_DIR, vid + ".mp4")
+            try:
+                if not os.path.exists(dl_path):
+                    _download_direct(direct, dl_path, None)
+                dl_file = dl_path
+                if save_video:
+                    rec["file"] = os.path.basename(dl_path)
+                    rec["download_url"] = "/downloads/" + os.path.basename(dl_path)
+                else:
+                    rec["file"] = None
+                    rec["download_url"] = None
+            except Exception as e:
+                rec["warning"] = f"直链下载失败({str(e)[:60]})，改走 yt-dlp"
+                dl_file = None
+        if not dl_file and (save_video or need_trans):
+            with yt_dlp.YoutubeDL(_ytdl_opts(None)) as ydl:
+                info = ydl.extract_info(url, download=True)
+            path = ydl.prepare_filename(info)
+            if not os.path.exists(path):
+                base = os.path.splitext(os.path.basename(path))[0]
+                cands = [f for f in os.listdir(DOWNLOADS_DIR) if f.startswith(base)]
+                if not cands:
+                    raise RuntimeError("文件未找到")
+                path = os.path.join(DOWNLOADS_DIR, cands[0])
+            dl_file = path
+            if save_video:
+                rec["file"] = os.path.basename(path)
+                rec["download_url"] = "/downloads/" + os.path.basename(path)
+            rec["title"] = info.get("title") or ""
+            rec["upload_date"] = info.get("upload_date") or ""
+            rec["duration"] = info.get("duration")
+            if rec.get("views") is None:
+                rec["views"] = info.get("view_count")
+            if rec.get("likes") is None:
+                rec["likes"] = info.get("like_count")
+            if rec.get("comments_count") is None:
+                rec["comments_count"] = info.get("comment_count")
+            rec["description"] = (info.get("description") or "").strip()
+            if not rec.get("caption"):
+                rec["caption"] = rec.get("description", "")
+
+        if source.get("skip_transcribe") or not dl_file:
+            rec["transcript"] = None
+            rec["language"] = None
+            rec["segments"] = []
+            if not dl_file and need_trans:
+                rec["warning"] = "视频获取失败，无法转写口播文案（数据仍完整）"
+            elif source.get("skip_transcribe"):
+                rec["warning"] = "已跳过语音识别（仅下载+数据）"
+        else:
+            try:
+                transcript, timed, language = _transcribe(dl_file, model_name, None)
+                rec["transcript"] = transcript
+                rec["language"] = language
+                rec["segments"] = timed[:800]
+            except Exception as e:
+                rec["transcript"] = None
+                rec["warning"] = f"语音识别失败：{str(e)[:200]}"
+            finally:
+                if need_trans and not save_video and dl_file and os.path.exists(dl_file):
+                    try:
+                        os.remove(dl_file)
+                    except Exception:
+                        pass
+
+        if want_comments:
+            cdata = _fetch_comments_best_effort(url)
+            cmts, ccount = cdata.get("comments") or [], cdata.get("count")
+            if cmts:
+                for c in cmts:
+                    c["no"] = no
+                comments = cmts
+            if rec.get("comments_count") is None and ccount is not None:
+                rec["comments_count"] = ccount
+        rec["status"] = "成功"
+    except Exception as e:
+        rec["status"] = f"失败: {str(e)[:200]}"
+    return rec, comments
+
+
 def _run_batch_job(job_id, source, model_name, want_comments):
     # 任务运行在独立子进程（multiprocessing），从磁盘恢复 job 状态，与主服务完全隔离
     job = _load_job(job_id) or {"id": job_id, "type": "batch", "status": "queued", "message": "已加入队列",
@@ -616,137 +735,30 @@ def _run_batch_job(job_id, source, model_name, want_comments):
         job["total"] = total
         results = []
         comments_all = []
-
-        for i, v in enumerate(videos):
-            no = i + 1
-            url = v["url"] if isinstance(v, dict) else v
-            job["current"] = {"no": no, "total": total, "url": url}
-            setp(f"第 {no}/{total} 条：抓取数据中…", 3 + int(no / total * 70), f"开始处理 #{no}: {url[:80]}")
-            rec = {
-                "no": no, "url": url,
-                "video_id": v.get("video_id", "") if isinstance(v, dict) else "",
-                "title": v.get("title", "") if isinstance(v, dict) else "",
-                "caption": v.get("caption", "") if isinstance(v, dict) else "",
-                "post_id": v.get("post_id", "") if isinstance(v, dict) else "",
-                "publish_time": v.get("publish_time") if isinstance(v, dict) else None,
-                "upload_date": _fmt_time(v.get("publish_time")) if isinstance(v, dict) and v.get("publish_time") else "",
-                "likes": v.get("likes") if isinstance(v, dict) else None,
-                "comments_count": v.get("comments") if isinstance(v, dict) else None,
-                "shares": v.get("shares") if isinstance(v, dict) else None,
-                "views": v.get("views") if isinstance(v, dict) else None,
-                "duration": v.get("duration") if isinstance(v, dict) else None,
-                "status": "处理中",
-            }
-            results.append(rec)
-            try:
-                if not rec.get("video_id"):
-                    m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
-                    if m:
-                        rec["video_id"] = m.group(1)
-                _fetch_post_counts(rec)  # 优先从帖子页补互动数+直链+文案+发布时间
-                direct = rec.get("direct") or (v.get("direct", "") if isinstance(v, dict) else "")
-                dl_file = None
-                save_video = not bool(source.get("skip_download"))    # 用户要保存视频到本地
-                need_trans = not bool(source.get("skip_transcribe"))  # 用户要口播文案
-                # 转写必须有本地文件：仅转写不保存时，下载到临时目录，转写后自动删除（不囤 2.2G）
-                if direct and (save_video or need_trans):
-                    setp(f"第 {no}/{total} 条：下载视频中…", None, f"#{no} 下载中（{'保存' if save_video else '临时转写用'}）")
-                    vid = rec.get("video_id") or ""
-                    if not vid:
-                        m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
-                        vid = m.group(1) if m else f"video{no}"
-                    if save_video:
-                        dl_path = os.path.join(DOWNLOADS_DIR, vid + ".mp4")
-                    else:
-                        os.makedirs(TMP_DIR, exist_ok=True)
-                        dl_path = os.path.join(TMP_DIR, vid + ".mp4")
-                    try:
-                        if not os.path.exists(dl_path):
-                            _download_direct(direct, dl_path, job)
-                        dl_file = dl_path
-                        if save_video:
-                            rec["file"] = os.path.basename(dl_path)
-                            rec["download_url"] = "/downloads/" + os.path.basename(dl_path)
-                        else:
-                            rec["file"] = None
-                            rec["download_url"] = None
-                    except Exception as e:
-                        rec["warning"] = f"直链下载失败({str(e)[:60]})，改走 yt-dlp"
-                        setp(f"第 {no}/{total} 条：直链失败，yt-dlp 下载中…", None, f"#{no} yt-dlp 兜底")
-                        dl_file = None
-                if not dl_file and (save_video or need_trans):
-                    with yt_dlp.YoutubeDL(_ytdl_opts(job)) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                    path = ydl.prepare_filename(info)
-                    if not os.path.exists(path):
-                        base = os.path.splitext(os.path.basename(path))[0]
-                        cands = [f for f in os.listdir(DOWNLOADS_DIR) if f.startswith(base)]
-                        if not cands:
-                            raise RuntimeError("文件未找到")
-                        path = os.path.join(DOWNLOADS_DIR, cands[0])
-                    dl_file = path
-                    if save_video:
-                        rec["file"] = os.path.basename(path)
-                        rec["download_url"] = "/downloads/" + os.path.basename(path)
-                    rec["title"] = info.get("title") or ""
-                    rec["upload_date"] = info.get("upload_date") or ""
-                    rec["duration"] = info.get("duration")
-                    if rec.get("views") is None:
-                        rec["views"] = info.get("view_count")
-                    if rec.get("likes") is None:
-                        rec["likes"] = info.get("like_count")
-                    if rec.get("comments_count") is None:
-                        rec["comments_count"] = info.get("comment_count")
-                    rec["description"] = (info.get("description") or "").strip()
-                    if not rec.get("caption"):
-                        rec["caption"] = rec.get("description", "")
-
-                if source.get("skip_transcribe") or not dl_file:
-                    rec["transcript"] = None
-                    rec["language"] = None
-                    rec["segments"] = []
-                    if not dl_file and need_trans:
-                        rec["warning"] = "视频获取失败，无法转写口播文案（数据仍完整）"
-                    elif source.get("skip_transcribe"):
-                        rec["warning"] = "已跳过语音识别（仅下载+数据）"
-                else:
-                    setp(f"第 {no}/{total} 条：识别文案中…", 3 + int(no / total * 70) + 15, f"#{no} 转写中")
-                    try:
-                        transcript, timed, language = _transcribe(dl_file, model_name, job)
-                        rec["transcript"] = transcript
-                        rec["language"] = language
-                        rec["segments"] = timed[:800]
-                    except Exception as e:
-                        rec["transcript"] = None
-                        rec["warning"] = f"语音识别失败：{str(e)[:200]}"
-                    finally:
-                        # 仅转写不保存：转写完即删临时视频，不留磁盘负担
-                        if need_trans and not save_video and dl_file and os.path.exists(dl_file):
-                            try:
-                                os.remove(dl_file)
-                            except Exception:
-                                pass
-
-                if want_comments:
-                    cdata = _fetch_comments_best_effort(url)
-                    cmts, ccount = cdata.get("comments") or [], cdata.get("count")
-                    if cmts:
-                        for c in cmts:
-                            c["no"] = no
-                            comments_all.append(c)
-                        setp(f"第 {no}/{total} 条：抓到 {len(cmts)} 条评论", None, f"#{no} 评论 {len(cmts)} 条")
-                    else:
-                        setp(f"第 {no}/{total} 条：未抓到评论内容", None, f"#{no} 评论抓取为空（评论为懒加载或需登录）")
-                    if rec.get("comments_count") is None and ccount is not None:
-                        rec["comments_count"] = ccount
-                rec["status"] = "成功"
-            except Exception as e:
-                rec["status"] = f"失败: {str(e)[:200]}"
-                setp(f"第 {no}/{total} 条失败", None, f"#{no} 失败: {str(e)[:150]}")
-            job["videos"] = list(results)
-            job["percent"] = 3 + int(no / total * 90)
-            _save_job(job)
-            time.sleep(1.5)  # 放缓节奏，降低 FB 限流概率
+        # 并发处理：3 条同时下载/转写，共享一个语音模型，速度约 3 倍
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results = [None] * total
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(_process_one_video, no, total, v, source, model_name, want_comments): no
+                    for no, v in enumerate(videos, 1)}
+            for fut in as_completed(futs):
+                no = futs[fut]
+                try:
+                    rec, cmts = fut.result()
+                except Exception as e:
+                    u = videos[no - 1]
+                    rec = {"no": no, "status": f"失败: {str(e)[:150]}",
+                           "url": u["url"] if isinstance(u, dict) else str(u)}
+                    cmts = []
+                results[no - 1] = rec
+                comments_all.extend(cmts)
+                done_count += 1
+                job["current"] = {"no": no, "total": total, "url": rec.get("url", "")}
+                setp(f"已完成 {done_count}/{total} 条…", 3 + int(done_count / total * 90), f"#{no} 完成")
+                job["videos"] = list(results)
+                _save_job(job)
+                time.sleep(0.3)  # 轻微放缓，降低 FB 限流概率
 
         # 汇总
         setp("正在生成汇总…", 95, "汇总计算中")
