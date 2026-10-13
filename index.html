@@ -308,6 +308,25 @@
 
 <script>
 (function () {
+  /* ---------- 多用户会话：每个浏览器生成唯一会话 ID，所有 API 请求携带，
+     服务器据此隔离各自的 FB 登录态 / 任务 / 存档（部署公网后多人互不干扰） ---------- */
+  var SID = localStorage.getItem('rs_session');
+  if (!SID) {
+    SID = 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('rs_session', SID);
+  }
+  window.rsSession = SID;
+  var _origFetch = window.fetch;
+  window.fetch = function (url, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    if (!(opts.headers instanceof Headers)) { opts.headers = Object.assign({}, opts.headers); }
+    opts.headers['X-Session'] = SID;
+    return _origFetch(url, opts);
+  };
+  /* 首次访问：若本机保留全局登录态（升级迁移场景），让服务器播种到本会话 */
+  fetch('/api/first_visit').catch(function () {});
+
   /* ---------- 通用 ---------- */
   function esc(s) {
     return String(s == null ? '' : s)
@@ -748,8 +767,8 @@
     }
     if (jobId && jobId.indexOf('saved:') === 0) {
       var sp = jobId.slice(6);
-      bExport.href = '/api/export_saved/' + encodeURIComponent(sp);
-      bExportVid.href = '/api/export_videos_saved/' + encodeURIComponent(sp);
+      bExport.href = '/api/export_saved/' + encodeURIComponent(sp) + '?session=' + window.rsSession;
+      bExportVid.href = '/api/export_videos_saved/' + encodeURIComponent(sp) + '?session=' + window.rsSession;
     } else {
       bExport.href = '/api/export/' + jobId;
       bExportVid.href = '/api/export_videos/' + jobId;

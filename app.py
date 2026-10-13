@@ -26,8 +26,22 @@ EXPORTS_DIR = os.path.join(BASE_DIR, "exports")
 JOBS_DIR = os.path.join(BASE_DIR, "jobs")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
-for _d in (DOWNLOADS_DIR, EXPORTS_DIR, JOBS_DIR, DATA_DIR):
+COOKIES_DIR = os.path.join(BASE_DIR, "cookies")   # 多用户：每会话一个 cookies/<sid>.txt
+for _d in (DOWNLOADS_DIR, EXPORTS_DIR, JOBS_DIR, DATA_DIR, COOKIES_DIR):
     os.makedirs(_d, exist_ok=True)
+
+
+def _session():
+    """从请求头取会话 ID（前端 localStorage 生成的 UUID），用于多用户隔离。
+    格式非法或缺省时回退 'public'（兼容本地单用户用法）。"""
+    sid = (request.headers.get("X-Session") or request.args.get("session") or "").strip()
+    if sid and re.match(r"^[A-Za-z0-9_-]{8,64}$", sid):
+        return sid
+    return "public"
+
+
+def session_cookies(sid):
+    return os.path.join(COOKIES_DIR, sid + ".txt")
 
 # 把 imageio-ffmpeg 自带的 ffmpeg 加入 PATH，供 yt-dlp 合并音视频使用（如需要）
 try:
@@ -182,13 +196,16 @@ def _transcribe(path, model_name, job):
     return " ".join(text_parts), timed, getattr(seg_info, "language", None)
 
 
-def _fb_fetch(url, timeout=25):
+def _fb_fetch(url, timeout=25, cookies_file=None):
     """用 curl_cffi 模拟 Chrome TLS 指纹 + 登录 cookies 抓取 Facebook 页面。
-    普通 requests 会被 FB 反爬以 HTTP 400 拒绝，curl_cffi 可正常返回完整 HTML。"""
+    普通 requests 会被 FB 反爬以 HTTP 400 拒绝，curl_cffi 可正常返回完整 HTML。
+    cookies_file 可指定某会话的登录态（多用户），缺省用全局 cookies.txt。"""
     import http.cookiejar
     from curl_cffi import requests as cr
-    cj = http.cookiejar.MozillaCookieJar(COOKIES_FILE)
-    cj.load(ignore_discard=True, ignore_expires=True)
+    cf = cookies_file or COOKIES_FILE
+    cj = http.cookiejar.MozillaCookieJar(cf)
+    if os.path.exists(cf):
+        cj.load(ignore_discard=True, ignore_expires=True)
     ck = {c.name: c.value for c in cj}
     last = None
     for _ in range(4):
@@ -223,13 +240,13 @@ def _clean_win(win):
     return win.replace('\\"', '"')
 
 
-def _enumerate_page_videos(page, job=None, max_videos=MAX_VIDEOS):
+def _enumerate_page_videos(page, job=None, max_videos=MAX_VIDEOS, cookies_file=None):
     """抓取主页视频列表并解析全部视频帖（curl_cffi + 嵌入 JSON 解析）。
     主数据源：主页的 /videos 标签（视频网格，含 URL/标题/文案/观看数/时长）；
     辅数据源：主页时间线（补点赞/评论/分享互动数）。两者按 video_id 合并去重。
     返回 [ {url, post_id, video_id, caption, title, publish_time, likes, comments, shares, views, duration} ]
     覆盖范围：/videos 标签首屏视频网格（通常为该主页公开视频的一部分，可能不含最早的历史视频）。"""
-    html = _fb_fetch(f"https://www.facebook.com/{page}/videos")
+    html = _fb_fetch(f"https://www.facebook.com/{page}/videos", cookies_file=cookies_file)
     videos, by_id = [], {}
     pat = re.compile(r'(?:\\"__typename\\":\\"Video\\",\\"id\\":\\"(\d+)\\"|"__typename":"Video","id":"(\d+)")')
     for m in pat.finditer(html):
@@ -267,7 +284,7 @@ def _enumerate_page_videos(page, job=None, max_videos=MAX_VIDEOS):
 
     # 时间线补互动数（点赞/评论/分享）与 reel 直达链接
     try:
-        t_html = _fb_fetch(f"https://www.facebook.com/{page}")
+        t_html = _fb_fetch(f"https://www.facebook.com/{page}", cookies_file=cookies_file)
         for m in pat.finditer(t_html):
             vid = m.group(1) or m.group(2)
             rec = by_id.get(vid)
@@ -303,12 +320,14 @@ def _enumerate_page_videos(page, job=None, max_videos=MAX_VIDEOS):
     return videos
 
 
-def _download_direct(url, path, job):
+def _download_direct(url, path, job, cookies_file=None):
     """用 curl_cffi（Chrome 指纹）流式下载直链 mp4，避免 yt-dlp 页面抓取被 FB 限流。"""
     import http.cookiejar
     from curl_cffi import requests as cr
-    cj = http.cookiejar.MozillaCookieJar(COOKIES_FILE)
-    cj.load(ignore_discard=True, ignore_expires=True)
+    cf = cookies_file or COOKIES_FILE
+    cj = http.cookiejar.MozillaCookieJar(cf)
+    if os.path.exists(cf):
+        cj.load(ignore_discard=True, ignore_expires=True)
     ck = {c.name: c.value for c in cj}
     last = None
     for attempt in range(3):
@@ -364,7 +383,7 @@ def _extract_direct_mp4(raw, strict=False):
     return un(sorted(set(cands), key=len)[-1]) if cands else ""
 
 
-def _fetch_post_counts(rec):
+def _fetch_post_counts(rec, cookies_file=None):
     """从视频帖子页补抓互动数（点赞/分享/评论/观看）。失败静默，保留原值。"""
     vid = rec.get("video_id") or ""
     if not vid:
@@ -375,7 +394,7 @@ def _fetch_post_counts(rec):
     if not vid:
         return
     try:
-        html = _fb_fetch(f"https://www.facebook.com/video.php?v={vid}")
+        html = _fb_fetch(f"https://www.facebook.com/video.php?v={vid}", cookies_file=cookies_file)
         win = _clean_win(html)
         rcm = re.findall(r'"reaction_count":\{"count":(\d+)\}', win)
         # 分享数：页面有多种结构，全部尝试取最大
@@ -441,7 +460,7 @@ def _fmt_time(ts):
         return ""
 
 
-def _fetch_comments_best_effort(post_url, limit=MAX_COMMENTS_PER_VIDEO):
+def _fetch_comments_best_effort(post_url, limit=MAX_COMMENTS_PER_VIDEO, cookies_file=None):
     """从 m.facebook.com（移动端）帖子/视频页抓评论——移动端服务端渲染，评论以 JSON 嵌入页面。
     返回 {"comments": [ {comment_id, author, text, time, likes} ], "count": 总评论数或 None}。"""
     url = post_url.replace("www.facebook.com", "m.facebook.com") if "www.facebook.com" in post_url else post_url
@@ -450,7 +469,7 @@ def _fetch_comments_best_effort(post_url, limit=MAX_COMMENTS_PER_VIDEO):
     out, seen, count = [], set(), None
     try:
         for _page in range(3):  # 最多跟 3 次「查看更早评论」翻页
-            html = _fb_fetch(url)
+            html = _fb_fetch(url, cookies_file=cookies_file)
             win = _clean_win(html)
             cm = re.search(r'"total_comment_count":(\d+)', win)
             if cm and count is None:
@@ -547,7 +566,7 @@ def _run_single_job(job_id, url, model_name):
 
 # ----------------------------- 批量任务 -----------------------------
 
-def _enumerate_page_videos_smart(page, job=None, max_videos=MAX_VIDEOS):
+def _enumerate_page_videos_smart(page, job=None, max_videos=MAX_VIDEOS, cookies_file=None):
     """主页视频全量枚举：本地深度抓取缓存优先（浏览器滚动抓到的全部 URL），
     再用实时首屏枚举去重合并，确保同一主页能拿到全部 Reels/视频。"""
     m = re.search(r"id=(\d+)", page) or re.search(r"(\d+)", page)
@@ -574,7 +593,7 @@ def _enumerate_page_videos_smart(page, job=None, max_videos=MAX_VIDEOS):
             job["log"].append(f"命中本地深度抓取缓存 {len(cached_recs)} 条（浏览器全量滚动抓取）")
         return cached_recs[:max_videos]
 
-    live = _enumerate_page_videos(page, job, max_videos=max_videos)
+    live = _enumerate_page_videos(page, job, max_videos=max_videos, cookies_file=cookies_file)
     if job:
         job["log"].append(f"首屏枚举 {len(live)} 条（Facebook 公开页仅渲染首屏，历史视频建议使用浏览器深度抓取后缓存）")
     return live
@@ -583,6 +602,7 @@ def _enumerate_page_videos_smart(page, job=None, max_videos=MAX_VIDEOS):
 def _process_one_video(no, total, v, source, model_name, want_comments):
     """批量任务中单条视频的处理：抓数据 → 下载（保存/临时）→ 转写 → 删临时。
     运行在并发线程池内：不写 job 状态（避免并发写文件冲突），只返回结果。"""
+    cf = session_cookies(source.get("session") or "public")
     url = v["url"] if isinstance(v, dict) else v
     rec = {
         "no": no, "url": url,
@@ -605,7 +625,7 @@ def _process_one_video(no, total, v, source, model_name, want_comments):
             m = re.search(r"[/?]v=(\d+)", url) or re.search(r"/(?:reel|videos|watch)/(\d+)", url)
             if m:
                 rec["video_id"] = m.group(1)
-        _fetch_post_counts(rec)  # 优先从帖子页补互动数+直链+文案+发布时间
+        _fetch_post_counts(rec, cookies_file=cf)  # 优先从帖子页补互动数+直链+文案+发布时间
         direct = rec.get("direct") or (v.get("direct", "") if isinstance(v, dict) else "")
         dl_file = None
         save_video = not bool(source.get("skip_download"))    # 用户要保存视频到本地
@@ -622,7 +642,7 @@ def _process_one_video(no, total, v, source, model_name, want_comments):
                 dl_path = os.path.join(TMP_DIR, vid + ".mp4")
             try:
                 if not os.path.exists(dl_path):
-                    _download_direct(direct, dl_path, None)
+                    _download_direct(direct, dl_path, None, cookies_file=cf)
                 dl_file = dl_path
                 if save_video:
                     rec["file"] = os.path.basename(dl_path)
@@ -685,7 +705,7 @@ def _process_one_video(no, total, v, source, model_name, want_comments):
                         pass
 
         if want_comments:
-            cdata = _fetch_comments_best_effort(url)
+            cdata = _fetch_comments_best_effort(url, cookies_file=cf)
             cmts, ccount = cdata.get("comments") or [], cdata.get("count")
             if cmts:
                 for c in cmts:
@@ -719,10 +739,11 @@ def _run_batch_job(job_id, source, model_name, want_comments):
     try:
         videos = source.get("videos") or []
         page = source.get("page") or ""
+        cf = session_cookies(source.get("session") or "public")
         if source.get("mode") == "page" and not videos:
             setp("正在枚举主页视频…", 1, f"枚举主页 {page}")
             try:
-                videos = _enumerate_page_videos_smart(page, job, max_videos=source.get("limit") or MAX_VIDEOS)
+                videos = _enumerate_page_videos_smart(page, job, max_videos=source.get("limit") or MAX_VIDEOS, cookies_file=cf)
             except Exception as e:
                 setp("枚举主页失败", None, f"枚举失败: {str(e)[:200]}")
                 raise RuntimeError(f"主页枚举失败：{e}。请确认已上传登录 cookies（主页模式需要），或改用「粘贴多条链接」模式。")
@@ -767,7 +788,7 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                          "total": total, "model": model_name, "comments_enabled": want_comments,
                          "page": page, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if page:
-            _save_page_result(page, job["result"])
+            _save_page_result(page, job["result"], job.get("session"))
         setp("完成，可导出 Excel", 100, f"完成：成功 {sum(1 for r in results if r['status']=='成功')}/{total}")
         job["status"] = "done"
     except Exception as e:
@@ -835,6 +856,22 @@ def analyze():
     return jsonify({"job_id": job_id})
 
 
+@app.get("/api/first_visit")
+def first_visit():
+    """新访客首次打开页面时调用：若服务器保留全局 cookies.txt（本地单用户迁移场景），
+    播种一份给该会话，使升级后登录态无缝继承。公网部署时运维删除 cookies.txt 即关闭此行为。"""
+    sid = _session()
+    cf = session_cookies(sid)
+    if sid != "public" and not os.path.exists(cf) and os.path.exists(COOKIES_FILE):
+        try:
+            import shutil
+            shutil.copy(COOKIES_FILE, cf)
+            return jsonify({"ok": True, "inherited": True})
+        except Exception:
+            pass
+    return jsonify({"ok": True, "inherited": False})
+
+
 @app.post("/api/analyze_batch")
 def analyze_batch():
     data = request.get_json(silent=True) or {}
@@ -865,10 +902,11 @@ def analyze_batch():
         source = {"mode": "urls", "videos": urls}
     source["skip_transcribe"] = bool(data.get("skip_transcribe"))
     source["skip_download"] = bool(data.get("skip_download"))
+    source["session"] = _session()   # 多用户隔离：任务绑定该会话的 cookies
     job_id = uuid.uuid4().hex[:12]
     JOBS[job_id] = {"id": job_id, "type": "batch", "status": "queued", "message": "已加入队列",
                     "percent": 0, "result": None, "error": None, "model": model,
-                    "log": [], "videos": [], "total": None, "current": None,
+                    "log": [], "videos": [], "total": None, "current": None, "session": source["session"],
                     "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     _save_job(JOBS[job_id])
     # 任务跑在独立子进程（fork：系统 Python 上 spawn 不可用，fork 直接继承内存、无需重载）：
@@ -887,8 +925,9 @@ def deep_scan():
     page = _extract_page_name((data.get("page") or "").strip())
     if not page:
         return jsonify({"error": "请填写主页链接或主页名"}), 400
+    sid = _session()
     scan_id = uuid.uuid4().hex[:12]
-    JOBS[scan_id] = {"id": scan_id, "type": "deep_scan", "status": "running", "page": page,
+    JOBS[scan_id] = {"id": scan_id, "type": "deep_scan", "status": "running", "page": page, "session": sid,
                      "message": "正在启动深度抓取…", "percent": 1, "count": None,
                      "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     _save_job(JOBS[scan_id])
@@ -897,7 +936,7 @@ def deep_scan():
         return jsonify({"error": "缺少 .venv/bin/python（playwright 环境）"}), 500
     import subprocess
     subprocess.Popen(
-        [venv_py, os.path.join(BASE_DIR, "deep_scan_worker.py"), page, COOKIES_FILE, scan_id],
+        [venv_py, os.path.join(BASE_DIR, "deep_scan_worker.py"), page, session_cookies(sid), scan_id],
         cwd=BASE_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return jsonify({"scan_id": scan_id})
@@ -933,18 +972,29 @@ def _page_key(page):
     return key or "page"
 
 
-def _save_page_result(page, result):
-    """主页批量分析完成后自动存档到 data/<page>_result.json，下次打开网页可直接加载。"""
+def _save_page_result(page, result, sid=None):
+    """主页批量分析完成后自动存档到 data/<sid>_<page>_result.json（多用户按会话隔离）。
+    会话为 public（本地单用户）时沿用无前缀旧文件名，兼容已有存档。"""
     try:
-        fp = os.path.join(DATA_DIR, _page_key(page) + "_result.json")
-        with open(fp, "w", encoding="utf-8") as f:
+        key = _page_key(page)
+        fn = f"{key}_result.json" if (not sid or sid == "public") else f"{sid}_{key}_result.json"
+        with open(os.path.join(DATA_DIR, fn), "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False)
     except Exception:
         pass
 
 
-def _load_saved_result(page):
-    fp = os.path.join(DATA_DIR, _page_key(page) + "_result.json")
+def _load_saved_result(page, sid=None):
+    key = _page_key(page)
+    if sid and sid != "public":
+        fp = os.path.join(DATA_DIR, f"{sid}_{key}_result.json")
+        if os.path.exists(fp):
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    fp = os.path.join(DATA_DIR, f"{key}_result.json")  # 回退旧 public 存档
     if not os.path.exists(fp):
         return None
     try:
@@ -956,25 +1006,34 @@ def _load_saved_result(page):
 
 @app.get("/api/saved_results")
 def saved_results():
-    """列出 data/ 下所有已存档的主页分析结果。"""
+    """列出当前会话已存档的主页分析结果（多用户隔离；兼容显示旧 public 存档为只读）。"""
+    sid = _session()
     items = []
+    prefix = "" if sid == "public" else sid + "_"
     try:
         for fn in os.listdir(DATA_DIR):
             if not fn.endswith("_result.json"):
                 continue
+            key = fn[:-len("_result.json")]
+            is_public = "_" not in key            # 无前缀 = 升级前的旧存档
+            if prefix and not (fn.startswith(prefix) or is_public):
+                continue                          # 只显示本会话存档 + 旧 public 存档
             try:
                 with open(os.path.join(DATA_DIR, fn), encoding="utf-8") as f:
                     d = json.load(f)
             except Exception:
                 continue
-            page = d.get("page") or fn[:-len("_result.json")]
-            items.append({
+            page = d.get("page") or key
+            item = {
                 "page": page,
                 "total": d.get("total"),
                 "success": (d.get("summary") or {}).get("success"),
                 "generated_at": d.get("generated_at"),
                 "model": d.get("model"),
-            })
+            }
+            if is_public and sid != "public":
+                item["readonly"] = True
+            items.append(item)
     except Exception:
         pass
     items.sort(key=lambda x: x.get("generated_at") or "", reverse=True)
@@ -983,7 +1042,7 @@ def saved_results():
 
 @app.get("/api/saved_result/<page>")
 def saved_result(page):
-    d = _load_saved_result(page)
+    d = _load_saved_result(page, _session())
     if not d:
         return jsonify({"error": "该主页没有已保存的分析结果"}), 404
     return jsonify(d)
@@ -991,7 +1050,7 @@ def saved_result(page):
 
 @app.get("/api/export_saved/<page>")
 def export_saved(page):
-    d = _load_saved_result(page)
+    d = _load_saved_result(page, _session())
     if not d:
         return jsonify({"error": "该主页没有已保存的分析结果"}), 404
     out_path = _build_excel(d)
@@ -1006,7 +1065,7 @@ def export_videos_saved(page):
     """把已保存主页分析中下载过的视频打包成 zip 下载。"""
     import io as _io
     import zipfile as _zipfile
-    d = _load_saved_result(page)
+    d = _load_saved_result(page, _session())
     if not d:
         return jsonify({"error": "该主页没有已保存的分析结果"}), 404
     files = []
@@ -1033,9 +1092,10 @@ def download_one():
     url = (data.get("url") or "").strip()
     if not url:
         return jsonify({"error": "缺少视频链接"}), 400
+    cf = session_cookies(_session())
     try:
         rec = {"url": url}
-        _fetch_post_counts(rec)
+        _fetch_post_counts(rec, cookies_file=cf)
         direct = rec.get("direct")
         if not direct:
             return jsonify({"error": "未找到可下载直链（可能需要有效登录 cookies）"}), 400
@@ -1045,7 +1105,7 @@ def download_one():
             vid = m.group(1) if m else "video"
         dl_path = os.path.join(DOWNLOADS_DIR, vid + ".mp4")
         if not os.path.exists(dl_path):
-            _download_direct(direct, dl_path, {"id": "one"})
+            _download_direct(direct, dl_path, {"id": "one"}, cookies_file=cf)
         return jsonify({"ok": True, "file": "/downloads/" + os.path.basename(dl_path),
                         "size": os.path.getsize(dl_path) if os.path.exists(dl_path) else 0})
     except Exception as e:
@@ -1065,11 +1125,12 @@ def _load_pw_state():
         return "none", ""
 
 
-def _pw_login_worker():
+def _pw_login_worker(sid):
     """通过独立 venv 中的 playwright 弹出浏览器窗口让用户登录 Facebook，
-    登录完成后导出 cookies 到 COOKIES_FILE。主服务不依赖 playwright 包。"""
+    登录完成后导出 cookies 到该会话的 cookies 文件。主服务不依赖 playwright 包。"""
     PW_STATE["status"] = "pending"
     PW_STATE["msg"] = "正在打开浏览器登录窗口…"
+    cf = session_cookies(sid)
     try:
         venv_py = os.path.join(BASE_DIR, ".venv", "bin", "python")
         worker = os.path.join(BASE_DIR, "login_worker.py")
@@ -1078,7 +1139,7 @@ def _pw_login_worker():
             PW_STATE["msg"] = "登录组件未安装完成，请稍后重试"
             return
         import subprocess
-        subprocess.run([venv_py, worker, COOKIES_FILE, PW_STATE_FILE], timeout=720)
+        subprocess.run([venv_py, worker, cf, PW_STATE_FILE], timeout=720)
     except Exception as e:
         PW_STATE["status"] = "error"
         PW_STATE["msg"] = f"登录失败：{str(e)[:120]}"
@@ -1091,22 +1152,25 @@ def _pw_login_worker():
 def facebook_login():
     if PW_STATE["status"] == "pending":
         return jsonify({"ok": False, "error": "登录窗口已在打开中，请先完成当前登录"}), 409
-    threading.Thread(target=_pw_login_worker, daemon=True).start()
+    sid = _session()
+    threading.Thread(target=_pw_login_worker, args=(sid,), daemon=True).start()
     return jsonify({"ok": True, "message": "正在打开 Facebook 登录窗口…"})
 
 
 @app.get("/api/login_status")
 def login_status():
+    sid = _session()
+    cf = session_cookies(sid)
     fst, fmsg = _load_pw_state()
     st = fst if fst != "none" else PW_STATE["status"]
     msg = fmsg if fmsg else PW_STATE["msg"]
-    has_cookies = os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100
+    has_cookies = os.path.exists(cf) and os.path.getsize(cf) > 100
     if st == "pending":
         return jsonify({"status": "pending", "message": msg or "正在登录…", "has_cookies": has_cookies})
     if st == "error":
         return jsonify({"status": "error", "message": msg or "登录失败", "has_cookies": has_cookies})
     if has_cookies:
-        mtime = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(COOKIES_FILE)))
+        mtime = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(cf)))
         return jsonify({"status": "logged_in", "message": f"已配置登录态（cookies 更新于 {mtime}）", "has_cookies": True})
     return jsonify({"status": "none", "message": "未登录。点击「登录 Facebook」在弹出窗口完成登录即可。", "has_cookies": False})
 
@@ -1116,15 +1180,17 @@ def upload_cookies():
     f = request.files.get("file")
     if not f:
         return jsonify({"error": "未收到文件"}), 400
-    f.save(COOKIES_FILE)
-    size = os.path.getsize(COOKIES_FILE)
+    cf = session_cookies(_session())
+    f.save(cf)
+    size = os.path.getsize(cf)
     return jsonify({"ok": True, "size": size, "hint": "cookies 已保存，批量模式将使用该登录态"})
 
 
 @app.delete("/api/upload_cookies")
 def delete_cookies():
-    if os.path.exists(COOKIES_FILE):
-        os.remove(COOKIES_FILE)
+    cf = session_cookies(_session())
+    if os.path.exists(cf):
+        os.remove(cf)
     return jsonify({"ok": True})
 
 
