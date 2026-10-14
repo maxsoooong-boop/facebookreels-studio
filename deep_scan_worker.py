@@ -92,7 +92,7 @@ def main():
 
             seen = set()
             stable = 0
-            total_rounds = 50
+            total_rounds = 200  # 上限200轮（约10分钟）；连续4轮无新增则提前停止，适配任意大小主页
             for i in range(total_rounds):
                 # 滚动到底部触发懒加载
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")

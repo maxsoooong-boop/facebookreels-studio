@@ -83,7 +83,7 @@ _MODEL_CACHE = {}  # model_name -> WhisperModel 实例
 _MODEL_LOCK = threading.Lock()
 
 ALLOWED_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
-MAX_VIDEOS = 300   # 批量模式安全上限
+MAX_VIDEOS = 1000   # 批量模式安全上限（深抓缓存全量为主，大主页也放开）
 PAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
 MAX_COMMENTS_PER_VIDEO = 80
 
@@ -872,6 +872,22 @@ def first_visit():
     return jsonify({"ok": True, "inherited": False})
 
 
+@app.get("/api/has_cache/<path:page>")
+def has_cache(page):
+    """检查该主页是否已有深度抓取的全量 URL 缓存（决定前端是否需先自动深抓）。"""
+    m = re.search(r"id=(\d+)", page) or re.search(r"(\d+)", page)
+    pid = m.group(1) if m else ""
+    path = os.path.join(PAGES_DIR, f"{pid}_all_urls.txt") if pid else ""
+    count = 0
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                count = sum(1 for ln in f if ln.strip() and "/" in ln)
+        except Exception:
+            count = 0
+    return jsonify({"has": count > 0, "count": count})
+
+
 @app.post("/api/analyze_batch")
 def analyze_batch():
     data = request.get_json(silent=True) or {}
@@ -885,13 +901,42 @@ def analyze_batch():
         page = (data.get("page") or "").strip()
         if not page:
             return jsonify({"error": "请填写主页链接或主页名"}), 400
-        source = {"mode": "page", "page": _extract_page_name(page)}
+        page_name = _extract_page_name(page)
+        source = {"mode": "page", "page": page_name}
         try:
             lim = int(data.get("limit") or 0)
             if lim > 0:
                 source["limit"] = min(lim, MAX_VIDEOS)
         except (TypeError, ValueError):
             pass
+        # 后端兜底：新主页（无深度抓取缓存）自动启动全量深抓，前端轮询 scan 完成后再重发本请求
+        m = re.search(r"id=(\d+)", page_name) or re.search(r"(\d+)", page_name)
+        pid = m.group(1) if m else ""
+        cache_path = os.path.join(PAGES_DIR, f"{pid}_all_urls.txt") if pid else ""
+        has_cache = False
+        if cache_path and os.path.exists(cache_path):
+            try:
+                with open(cache_path, encoding="utf-8") as f:
+                    has_cache = any(ln.strip() and "/" in ln for ln in f)
+            except Exception:
+                has_cache = False
+        if pid and not has_cache:
+            sid = _session()
+            scan_id = uuid.uuid4().hex[:12]
+            JOBS[scan_id] = {"id": scan_id, "type": "deep_scan", "status": "running", "page": page_name,
+                             "session": sid, "message": "该主页首次分析：正在自动深度抓取全部视频（约3-8分钟）…",
+                             "percent": 2, "count": None,
+                             "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            _save_job(JOBS[scan_id])
+            venv_py = os.path.join(BASE_DIR, ".venv", "bin", "python")
+            if os.path.exists(venv_py):
+                import subprocess
+                subprocess.Popen(
+                    [venv_py, os.path.join(BASE_DIR, "deep_scan_worker.py"), page_name, session_cookies(sid), scan_id],
+                    cwd=BASE_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                return jsonify({"need_scan": True, "scan_id": scan_id,
+                                "message": "该主页首次分析：已自动启动深度抓取全部视频（约3-8分钟）…"}), 200
     else:
         urls = [u.strip() for u in (data.get("urls") or "").splitlines() if u.strip()]
         if not urls:
@@ -951,6 +996,7 @@ def status(job_id):
         "status": job.get("status"), "message": job.get("message"), "percent": job.get("percent"),
         "result": job.get("result"), "error": job.get("error"),
         "log": job.get("log", [])[-30:], "total": job.get("total"), "current": job.get("current"),
+        "count": job.get("count"), "page": job.get("page"),
     })
 
 

@@ -1,0 +1,13 @@
+待处理: 86 条
+job_id: 7fa2bb6cb919
+/Users/mac/Library/Python/3.9/lib/python/site-packages/faster_whisper/feature_extractor.py:224: RuntimeWarning: divide by zero encountered in matmul
+  mel_spec = self.mel_filters @ magnitudes
+/Users/mac/Library/Python/3.9/lib/python/site-packages/faster_whisper/feature_extractor.py:224: RuntimeWarning: overflow encountered in matmul
+  mel_spec = self.mel_filters @ magnitudes
+/Users/mac/Library/Python/3.9/lib/python/site-packages/faster_whisper/feature_extractor.py:224: RuntimeWarning: invalid value encountered in matmul
+  mel_spec = self.mel_filters @ magnitudes
+Building prefix dict from the default dictionary ...
+Loading model from cache /var/folders/dx/1thxkqr96hx997ppl_t0yskr0000gn/T/jieba.cache
+Loading model cost 0.235 seconds.
+Prefix dict has been built successfully.
+任务完成

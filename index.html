@@ -555,8 +555,65 @@
     blog.scrollTop = blog.scrollHeight;
   }
 
-  function startBatch(page, urls) {
+  function startBatch(page, urls, skipCacheCheck) {
     clearErr(err2);
+    if (page && !urls && !skipCacheCheck) {
+      /* 主页模式：先查是否有全量 URL 缓存。没有则自动深度抓取（约3-8分钟）→ 完成后自动开始全量分析 */
+      bGo.disabled = true;
+      bScan.disabled = true;
+      result2.classList.remove('show');
+      bar2.style.width = '2%';
+      pmsg2.textContent = '正在检查该主页的抓取缓存…';
+      blog.innerHTML = '';
+      prog2.classList.add('show');
+      fetch('/api/has_cache/' + encodeURIComponent(page)).then(function (r) { return r.json(); }).then(function (c) {
+        if (c.has && c.count > 0) {
+          pmsg2.textContent = '命中缓存 ' + c.count + ' 条，开始全量分析…';
+          startBatch(page, '', true);   // 直接分析
+          return;
+        }
+        /* 无缓存：自动深抓（复用深抓流程） */
+        pmsg2.textContent = '该主页首次分析：正在自动深度抓取全部视频（约3-8分钟，请勿关闭页面）…';
+        fetch('/api/deep_scan', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: page })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (d.error) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, d.error); bGo.disabled = false; bScan.disabled = false; return; }
+          timers.b = setInterval(function () {
+            fetch('/api/status/' + d.scan_id).then(function (r) { return r.json(); }).then(function (j) {
+              pmsg2.textContent = j.message || '';
+              bar2.style.width = (j.percent || 2) + '%';
+              if (j.log) addLog(j);
+              if (j.status === 'done') {
+                stopTimer(timers.b);
+                var n = j.count || 0;
+                if (n > 0) {
+                  pmsg2.textContent = '深度抓取完成，共 ' + n + ' 条视频，自动开始全量分析…';
+                  addLog({ log: ['深度抓取完成，命中缓存 ' + n + ' 条，自动开始批量分析'] });
+                  setTimeout(function () { startBatch(page, '', true); }, 800);
+                } else {
+                  prog2.classList.remove('show');
+                  showErr(err2, '未抓到任何视频（该主页可能没有公开视频，或需要重新登录）。');
+                  bScan.disabled = false; bGo.disabled = false;
+                }
+              } else if (j.status === 'error') {
+                stopTimer(timers.b); prog2.classList.remove('show');
+                showErr(err2, '深度抓取失敗：' + (j.message || j.error || '未知錯誤'));
+                if (j.log) addLog(j);
+                bScan.disabled = false; bGo.disabled = false;
+              }
+            }).catch(function () {});
+          }, 2500);
+        }).catch(function () {
+          stopTimer(timers.b); prog2.classList.remove('show');
+          showErr(err2, '無法連接到本地服務，請確認服務已啟動。'); bScan.disabled = false; bGo.disabled = false;
+        });
+      }).catch(function () {
+        /* 缓存检查失败：退回直接分析（保持可用） */
+        pmsg2.textContent = '缓存检查失败，直接开始分析…';
+        startBatch(page, '', true);
+      });
+      return;
+    }
     bGo.disabled = true;
     bScan.disabled = true;
     result2.classList.remove('show');
@@ -576,6 +633,36 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.error) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, d.error); bGo.disabled = false; bScan.disabled = false; return; }
+      if (d.need_scan) {
+        /* 后端已自动启动深度抓取（新主页）：轮询 scan → 完成 → 自动重发分析 */
+        pmsg2.textContent = d.message || '该主页首次分析：正在自动深度抓取全部视频（约3-8分钟，请勿关闭页面）…';
+        timers.b = setInterval(function () {
+          fetch('/api/status/' + d.scan_id).then(function (r) { return r.json(); }).then(function (j) {
+            pmsg2.textContent = j.message || '';
+            bar2.style.width = (j.percent || 2) + '%';
+            if (j.log) addLog(j);
+            if (j.status === 'done') {
+              stopTimer(timers.b);
+              var n = j.count || 0;
+              if (n > 0) {
+                pmsg2.textContent = '深度抓取完成，共 ' + n + ' 条视频，自动开始全量分析…';
+                addLog({ log: ['深度抓取完成，命中缓存 ' + n + ' 条，自动开始批量分析'] });
+                setTimeout(function () { startBatch(page, '', true); }, 800);
+              } else {
+                prog2.classList.remove('show');
+                showErr(err2, '深度抓取未发现视频（请检查主页是否有公开视频，或重新登录）。');
+                bScan.disabled = false; bGo.disabled = false;
+              }
+            } else if (j.status === 'error') {
+              stopTimer(timers.b); prog2.classList.remove('show');
+              showErr(err2, '深度抓取失敗：' + (j.message || j.error || '未知錯誤'));
+              if (j.log) addLog(j);
+              bScan.disabled = false; bGo.disabled = false;
+            }
+          }).catch(function () {});
+        }, 2500);
+        return;
+      }
       timers.b = setInterval(function () {
         fetch('/api/status/' + d.job_id).then(function (r) { return r.json(); }).then(function (j) {
           if (j.error && !j.status) { stopTimer(timers.b); prog2.classList.remove('show'); showErr(err2, j.error); bGo.disabled = false; bScan.disabled = false; return; }
@@ -645,7 +732,7 @@
             if (n > 0) {
               pmsg2.textContent = '深度抓取完成，共 ' + n + ' 条视频，自动开始批量分析…';
               addLog({ log: ['深度抓取完成，命中缓存 ' + n + ' 条，自动开始批量分析'] });
-              setTimeout(function () { startBatch(page, ''); }, 800);
+              setTimeout(function () { startBatch(page, '', true); }, 800);
             } else {
               prog2.classList.remove('show');
               showErr(err2, '未抓到任何视频（该主页可能没有公开视频，或需要重新登录）。');
