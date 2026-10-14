@@ -752,23 +752,30 @@ def _run_batch_job(job_id, source, model_name, want_comments):
             setp(f"枚举到 {len(videos)} 条视频，开始逐条处理", 3, f"共 {len(videos)} 条视频")
             job["total"] = len(videos)
 
-        total = len(videos)
+        # 续跑模式：prefill = 已完成条目（含原序号），新条目从 prefill 之后继续编号
+        prefill = source.get("prefill") or []
+        pre_total = len(prefill)
+        total = pre_total + len(videos)
         job["total"] = total
-        results = []
-        comments_all = []
+        results = [None] * total
+        for _p in prefill:
+            try:
+                results[int(_p["no"]) - 1] = _p["rec"]
+            except Exception:
+                pass
+        comments_all = [c for _p in prefill for c in (_p.get("comments") or [])]
         # 并发处理：3 条同时下载/转写，共享一个语音模型，速度约 3 倍
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        results = [None] * total
-        done_count = 0
+        done_count = pre_total
         with ThreadPoolExecutor(max_workers=3) as ex:
             futs = {ex.submit(_process_one_video, no, total, v, source, model_name, want_comments): no
-                    for no, v in enumerate(videos, 1)}
+                    for no, v in enumerate(videos, pre_total + 1)}
             for fut in as_completed(futs):
                 no = futs[fut]
                 try:
                     rec, cmts = fut.result()
                 except Exception as e:
-                    u = videos[no - 1]
+                    u = videos[no - pre_total - 1]
                     rec = {"no": no, "status": f"失败: {str(e)[:150]}",
                            "url": u["url"] if isinstance(u, dict) else str(u)}
                     cmts = []
@@ -789,7 +796,7 @@ def _run_batch_job(job_id, source, model_name, want_comments):
                          "page": page, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if page:
             _save_page_result(page, job["result"], job.get("session"))
-        setp("完成，可导出 Excel", 100, f"完成：成功 {sum(1 for r in results if r['status']=='成功')}/{total}")
+        setp("完成，可导出 Excel", 100, f"完成：成功 {sum(1 for r in results if r and r.get('status')=='成功')}/{total}")
         job["status"] = "done"
     except Exception as e:
         job["status"] = "error"
@@ -799,7 +806,7 @@ def _run_batch_job(job_id, source, model_name, want_comments):
 
 
 def _build_summary(videos, comments):
-    ok = [v for v in videos if v.get("status") == "成功"]
+    ok = [v for v in videos if v and isinstance(v, dict) and v.get("status") == "成功"]
     def nums(k):
         return [v[k] for v in ok if isinstance(v.get(k), (int, float))]
     views, likes, cmts, shares = nums("views"), nums("likes"), nums("comments_count"), nums("shares")
@@ -956,9 +963,15 @@ def analyze_batch():
     _save_job(JOBS[job_id])
     # 任务跑在独立子进程（fork：系统 Python 上 spawn 不可用，fork 直接继承内存、无需重载）：
     # 抓取/下载/转写即使崩溃（如底层库段错误）也不影响主服务
-    multiprocessing.get_context("fork").Process(
+    _p = multiprocessing.get_context("fork").Process(
         target=_run_batch_job, args=(job_id, source, model, want_comments), daemon=True
-    ).start()
+    )
+    _p.start()
+    # 记录子进程 PID，暂停/删除时可精准中止
+    _jb = _load_job(job_id) or JOBS[job_id]
+    _jb["pid"] = _p.pid
+    _jb["session"] = source.get("session")
+    _save_job(_jb)
     return jsonify({"job_id": job_id})
 
 
@@ -998,6 +1011,153 @@ def status(job_id):
         "log": job.get("log", [])[-30:], "total": job.get("total"), "current": job.get("current"),
         "count": job.get("count"), "page": job.get("page"),
     })
+
+
+@app.get("/api/running_jobs")
+def running_jobs():
+    """返回所有进行中（queued/running）任务，供页面顶部实时进度面板轮询。"""
+    out = []
+    try:
+        for fn in os.listdir(JOBS_DIR):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(JOBS_DIR, fn), encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception:
+                continue
+            if d.get("status") in ("queued", "running", "paused"):
+                out.append({
+                    "id": d.get("id"), "type": d.get("type"), "status": d.get("status"),
+                    "message": d.get("message"), "percent": d.get("percent"),
+                    "total": d.get("total"), "current": d.get("current"),
+                    "count": d.get("count"), "page": d.get("page"),
+                    "created": d.get("created"),
+                })
+    except Exception:
+        pass
+    out.sort(key=lambda x: x.get("created") or "", reverse=True)
+    return jsonify({"jobs": out})
+
+
+def _kill_job_process(job):
+    """优先按记录的 pid 杀；deep_scan 任务按 cmdline 匹配杀。返回是否杀到。"""
+    import signal as _sig
+    pid = job.get("pid")
+    if pid:
+        try:
+            os.kill(int(pid), _sig.SIGTERM)
+            return True
+        except Exception:
+            pass
+    if job.get("type") == "deep_scan" and job.get("id"):
+        try:
+            out = subprocess.check_output(["pgrep", "-f", f"deep_scan_worker.py .* {job['id']}"]).decode().split()
+            for _p in out:
+                try:
+                    os.kill(int(_p), _sig.SIGTERM)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            pass
+    return False
+
+
+@app.post("/api/pause_job/<job_id>")
+def pause_job(job_id):
+    job = _load_job(job_id)
+    if not job:
+        return jsonify({"error": "任务不存在"}), 404
+    if job.get("status") not in ("queued", "running"):
+        return jsonify({"error": "该任务当前状态不可暂停"}), 400
+    job["status"] = "paused"
+    job["message"] = "已暂停（已完成条目保留；如需继续请重新提交分析）"
+    _save_job(job)
+    _kill_job_process(job)
+    return jsonify({"ok": True, "status": "paused"})
+
+
+@app.post("/api/delete_job/<job_id>")
+def delete_job(job_id):
+    job = _load_job(job_id)
+    if not job:
+        return jsonify({"error": "任务不存在"}), 404
+    _kill_job_process(job)
+    job["status"] = "deleted"
+    job["message"] = "已删除"
+    _save_job(job)
+    try:
+        os.remove(os.path.join(JOBS_DIR, job_id + ".json"))
+    except Exception:
+        pass
+    return jsonify({"ok": True, "status": "deleted"})
+
+
+@app.post("/api/resume_job/<job_id>")
+def resume_job(job_id):
+    """暂停/中断的主页任务恢复：已完成条目保留原序号，从缓存重建剩余 URL 继续跑。"""
+    job = _load_job(job_id)
+    if not job:
+        return jsonify({"error": "任务不存在"}), 404
+    done = {}
+    for v in (job.get("videos") or []):
+        m = re.search(r"/(?:reel|videos|watch)/(\d+)", v.get("url") or "")
+        if m and v.get("no") is not None:
+            done[("reel" if "reel" in v.get("url", "") else "videos") + "/" + m.group(1)] = v
+    if not done:
+        return jsonify({"error": "该任务还没有已完成的条目，无法恢复（请直接重新提交分析）"}), 400
+    # 从 pages 缓存找该任务的来源主页：已完成的 URL 必须全部命中且最多命中
+    best = []
+    for fn in os.listdir(PAGES_DIR):
+        if not fn.endswith("_all_urls.txt"):
+            continue
+        try:
+            lines = [l.strip() for l in open(os.path.join(PAGES_DIR, fn), encoding="utf-8") if l.strip() and "/" in l]
+        except Exception:
+            continue
+        keys = set()
+        for u in lines:
+            m = re.search(r"/(?:reel|videos|watch)/(\d+)", u)
+            if m:
+                keys.add(("reel" if "reel" in u else "videos") + "/" + m.group(1))
+        if keys and set(done) <= keys and len(keys) > len(best):
+            best = lines
+    if not best:
+        return jsonify({"error": "找不到该任务的来源主页缓存，无法恢复（可直接重新粘贴主页链接分析）"}), 400
+    remain = []
+    for u in best:
+        m = re.search(r"/(?:reel|videos|watch)/(\d+)", u)
+        if not m:
+            remain.append(u)
+            continue
+        k = ("reel" if "reel" in u else "videos") + "/" + m.group(1)
+        if k not in done:
+            remain.append(u)
+    if not remain:
+        return jsonify({"error": "该任务的全部条目已完成"}), 400
+    prefill = [{"no": v["no"], "rec": v, "comments": []} for v in done.values()]
+    pre_total = len(prefill)
+    source = {"mode": "urls", "videos": remain, "skip_transcribe": False, "skip_download": False,
+              "session": job.get("session") or "public", "prefill": prefill}
+    new_id = uuid.uuid4().hex[:12]
+    JOBS[new_id] = {"id": new_id, "type": "batch", "status": "queued",
+                    "message": f"已恢复：剩余 {len(remain)} 条继续处理（含已完成 {pre_total} 条）",
+                    "percent": 5,
+                    "result": None, "error": None, "model": job.get("model") or "small",
+                    "log": [f"{datetime.now().strftime('%H:%M:%S')} 续跑任务：跳过已完成 {pre_total} 条，剩余 {len(remain)} 条"],
+                    "videos": list(done.values()), "total": pre_total + len(remain),
+                    "current": None, "session": source["session"],
+                    "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    _save_job(JOBS[new_id])
+    _p = multiprocessing.get_context("fork").Process(
+        target=_run_batch_job, args=(new_id, source, JOBS[new_id]["model"], False), daemon=True
+    )
+    _p.start()
+    _jb = _load_job(new_id) or JOBS[new_id]
+    _jb["pid"] = _p.pid
+    _save_job(_jb)
+    return jsonify({"job_id": new_id, "message": f"已恢复：剩余 {len(remain)} 条继续处理（已完成 {len(prefill)} 条保留）"})
 
 
 @app.get("/api/page_result/<job_id>")

@@ -1,0 +1,16 @@
+已完成 125 条，缺失 3 条
+补 #126: https://www.facebook.com/reel/906850655320817
+/Users/mac/Library/Python/3.9/lib/python/site-packages/faster_whisper/feature_extractor.py:224: RuntimeWarning: divide by zero encountered in matmul
+  mel_spec = self.mel_filters @ magnitudes
+/Users/mac/Library/Python/3.9/lib/python/site-packages/faster_whisper/feature_extractor.py:224: RuntimeWarning: overflow encountered in matmul
+  mel_spec = self.mel_filters @ magnitudes
+/Users/mac/Library/Python/3.9/lib/python/site-packages/faster_whisper/feature_extractor.py:224: RuntimeWarning: invalid value encountered in matmul
+  mel_spec = self.mel_filters @ magnitudes
+补 #127: https://www.facebook.com/reel/961377562903849
+补 #128: https://www.facebook.com/reel/963481706048042
+最终条数: 128 | 成功: 128
+Building prefix dict from the default dictionary ...
+Loading model from cache /var/folders/dx/1thxkqr96hx997ppl_t0yskr0000gn/T/jieba.cache
+Loading model cost 0.235 seconds.
+Prefix dict has been built successfully.
+已存档: {"条数": 128, "成功": 128, "观看": 30261584, "评论": 38948, "点赞": 272963}

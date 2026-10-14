@@ -149,6 +149,11 @@
     <p>单条分析：贴一条 Reels/影片链接，下载并识别文案；批量分析：贴主页或多条链接，逐条编号、下载、识别、抓指标与评论，导出 Excel。</p>
   </header>
 
+  <div class="card" id="live" style="display:none;">
+    <h2>⏳ 进行中任务（实时进度）</h2>
+    <div id="live-list"></div>
+  </div>
+
   <div class="tabs">
     <div class="tab active" data-tab="single">单条分析</div>
     <div class="tab" data-tab="batch">批量分析</div>
@@ -908,6 +913,48 @@
       alert('下载请求失败，请稍后再试');
     });
   });
+
+  /* ---------- 顶部实时进度面板：打开网页即可看到后端所有进行中任务 ---------- */
+  function jobAction(id, act) {
+    fetch('/api/' + act + '_job/' + id, { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) { alert(d.error); return; }
+      refreshLive();
+    }).catch(function () {});
+  }
+  function refreshLive() {
+    fetch('/api/running_jobs').then(function (r) { return r.json(); }).then(function (d) {
+      var jobs = d.jobs || [];
+      var live = document.getElementById('live');
+      var box = document.getElementById('live-list');
+      if (!jobs.length) { live.style.display = 'none'; return; }
+      live.style.display = 'block';
+      box.innerHTML = jobs.map(function (j) {
+        var pct = j.percent || 0;
+        var label = '';
+        if (j.type === 'deep_scan') {
+          label = '深度抓取 ' + (j.count || 0) + ' 条 | ' + (j.message || '');
+        } else {
+          var cur = j.current ? ('第 ' + j.current.no + '/' + j.total + ' 条') : ('共 ' + j.total + ' 条');
+          label = '全量分析 ' + cur + ' | ' + (j.message || '');
+        }
+        var btn = '';
+        if (j.status === 'paused') {
+          btn = '<button onclick="jobAction(\'' + j.id + '\',\'resume\')" style="font-size:12px;padding:2px 9px;border:1px solid #16a34a;border-radius:6px;background:#f0fdf4;color:#15803d;cursor:pointer;margin-right:4px;">繼續</button>';
+        } else {
+          btn = '<button onclick="jobAction(\'' + j.id + '\',\'pause\')" style="font-size:12px;padding:2px 9px;border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer;margin-right:4px;">暫停</button>';
+        }
+        var btns = '<span style="margin-left:10px;white-space:nowrap;">' + btn +
+          '<button onclick="jobAction(\'' + j.id + '\',\'delete\')" style="font-size:12px;padding:2px 9px;border:1px solid #fecaca;border-radius:6px;background:#fef2f2;color:#b91c1c;cursor:pointer;">刪除</button>' +
+          '</span>';
+        return '<div style="padding:8px 0;border-bottom:1px solid #eef2f6;">' +
+          '<div style="font-size:13px;color:#374151;display:flex;justify-content:space-between;align-items:center;gap:8px;"><span>' + esc(label) + '</span>' + btns + '</div>' +
+          '<div class="bar-bg"><div class="bar" style="width:' + Math.max(pct, 2) + '%;"></div></div>' +
+          '</div>';
+      }).join('');
+    }).catch(function () {});
+  }
+  refreshLive();
+  setInterval(refreshLive, 5000);
 })();
 </script>
 </body>
