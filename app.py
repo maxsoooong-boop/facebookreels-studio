@@ -1472,17 +1472,25 @@ def _build_excel(result):
     ws = wb.active
     ws.title = "视频汇总"
     headers = ["编号", "链接", "标题", "发布简介", "发布日期", "时长(秒)", "观看数", "点赞数",
-               "评论数", "分享数", "收藏数", "语言", "模型", "状态", "口播文案(转写)", "备注"]
+               "评论数", "分享数", "收藏数", "语言", "模型", "状态", "口播文案(转写)", "评论内容", "备注"]
     for j, h in enumerate(headers, 1):
         c = ws.cell(1, j, h)
         c.fill, c.font, c.alignment = HEADER_FILL, HEADER_FONT, CENTER
     ws.freeze_panes = "A2"
     for i, v in enumerate(result.get("videos", []), 2):
+        # 每条视频的评论合并成多行：评论人：评论话语
+        cmt_lines = []
+        for _c in (v.get("comments_list") or []):
+            _a = (_c.get("author") or "").strip()
+            _t = (_c.get("text") or "").strip()
+            if _t:
+                cmt_lines.append((_a + "：" if _a else "") + _t)
+        cmt_text = "\n".join(cmt_lines)
         row = [v.get("no"), v.get("url"), v.get("title") or "", v.get("caption") or "",
                v.get("upload_date") or "", v.get("duration"), v.get("views"), v.get("likes"),
                v.get("comments_count"), v.get("shares"), "不可得", v.get("language") or "",
                result.get("model", ""), v.get("status"), v.get("transcript") or "",
-               v.get("warning") or ""]
+               cmt_text, v.get("warning") or ""]
         for j, val in enumerate(row, 1):
             c = ws.cell(i, j, val)
             if j in (7, 8, 9, 10, 6):
@@ -1492,8 +1500,8 @@ def _build_excel(result):
                 c.alignment = CENTER
             else:
                 c.alignment = WRAP
-    fit(ws, {1: 6, 2: 46, 3: 30, 4: 36, 5: 12, 6: 10, 7: 10, 8: 9, 9: 9, 10: 9, 11: 9, 12: 9, 13: 9, 14: 12, 15: 60, 16: 24})
-    ws.auto_filter.ref = f"A1:P{ws.max_row}"
+    fit(ws, {1: 6, 2: 46, 3: 30, 4: 36, 5: 12, 6: 10, 7: 10, 8: 9, 9: 9, 10: 9, 11: 9, 12: 9, 13: 9, 14: 12, 15: 60, 16: 50, 17: 24})
+    ws.auto_filter.ref = f"A1:Q{ws.max_row}"
 
     ws2 = wb.create_sheet("评论明细")
     h2 = ["编号", "评论者", "评论时间", "评论内容", "评论点赞"]
