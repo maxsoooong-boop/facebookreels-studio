@@ -1501,7 +1501,16 @@ def _build_excel(result):
         c = ws2.cell(1, j, h)
         c.fill, c.font, c.alignment = HEADER_FILL, HEADER_FONT, CENTER
     ws2.freeze_panes = "A2"
-    comments = result.get("comments", [])
+    # 评论明细：从各视频的 comments_list 展开（真实抓取的评论内容）
+    comments = []
+    for _v in result.get("videos", []):
+        for _c in (_v.get("comments_list") or []):
+            comments.append({"no": _v.get("no"), "author": _c.get("author", ""), "time": _c.get("time", ""), "text": _c.get("text", ""), "likes": _c.get("likes", "")})
+    if not comments:
+        _cd = result.get("comments_detail") or {}
+        for _vid, _info in _cd.items():
+            for _c in _info.get("comments", []):
+                comments.append({"no": "", "author": _c.get("author", ""), "time": "", "text": _c.get("text", ""), "likes": ""})
     for i, c in enumerate(comments, 2):
         vals = [c.get("no"), c.get("author") or c.get("commenter") or "", c.get("time") or "", c.get("text") or "", c.get("likes")]
         for j, val in enumerate(vals, 1):
