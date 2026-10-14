@@ -775,6 +775,20 @@
     }
     bExport.style.display = 'inline-block';
     bExportVid.style.display = 'inline-block';
+    bExportVid.setAttribute('data-count', cur ? (cur.videos || []).filter(function (v) { return v && v.file; }).length : 0);
+  }
+
+  // 打包下载提示：大包打包需 1-2 分钟（磁盘流式，不再内存溢出）
+  var bExportVidEl = document.getElementById('b-export-vid');
+  if (bExportVidEl) {
+    bExportVidEl.addEventListener('click', function () {
+      var n = this.getAttribute('data-count') || '全部';
+      this.textContent = '正在打包 ' + n + ' 个高清视频（约1-2分钟，请勿关闭页面）…';
+      var self = this;
+      setTimeout(function () {
+        self.textContent = '📦 打包下載全部視頻（高清 zip）';
+      }, 150000);
+    });
   }
 
   // 表格「⬇ 下载」：单条按需下载（后端实时抓直链，不再批量囤 2.2G）

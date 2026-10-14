@@ -1060,11 +1060,22 @@ def export_saved(page):
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+def _build_videos_zip(files, zip_name):
+    """把 [(磁盘路径, zip内文件名)] 打包成磁盘 zip（ZIP_STORED 不压缩，大文件最快）。
+    避免几 GB 视频一次性进内存导致 OOM/卡死；返回磁盘路径。"""
+    import zipfile as _zipfile
+    zpath = os.path.join(EXPORTS_DIR, zip_name)
+    if os.path.exists(zpath):
+        os.remove(zpath)
+    with _zipfile.ZipFile(zpath, "w", _zipfile.ZIP_STORED) as z:
+        for p, name in files:
+            z.write(p, name)
+    return zpath
+
+
 @app.get("/api/export_videos_saved/<page>")
 def export_videos_saved(page):
-    """把已保存主页分析中下载过的视频打包成 zip 下载。"""
-    import io as _io
-    import zipfile as _zipfile
+    """把已保存主页分析中下载过的视频打包成 zip 下载（磁盘流式，支持数 GB 大包）。"""
     d = _load_saved_result(page, _session())
     if not d:
         return jsonify({"error": "该主页没有已保存的分析结果"}), 404
@@ -1076,13 +1087,10 @@ def export_videos_saved(page):
                 files.append((p, f"{v.get('no')}-{os.path.basename(v['file'])}"))
     if not files:
         return jsonify({"error": "该主页没有已下载的视频文件"}), 400
-    buf = _io.BytesIO()
-    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_STORED) as z:
-        for p, name in files:
-            z.write(p, name)
-    buf.seek(0)
-    return send_file(buf, mimetype="application/zip", as_attachment=True,
-                     download_name=f"{_page_key(page)}_全部视频_{len(files)}条.zip")
+    zname = f"{_page_key(page)}_全部视频_{len(files)}条_{uuid.uuid4().hex[:6]}.zip"
+    zpath = _build_videos_zip(files, zname)
+    return send_file(zpath, mimetype="application/zip", as_attachment=True,
+                     download_name=zname)
 
 
 @app.post("/api/download_one")
@@ -1208,9 +1216,7 @@ def export_excel(job_id):
 
 @app.get("/api/export_videos/<job_id>")
 def export_videos_zip(job_id):
-    """把任务中已下载的全部视频打包成 zip 下载。"""
-    import io as _io
-    import zipfile as _zipfile
+    """把任务中已下载的全部视频打包成 zip 下载（磁盘流式，支持数 GB 大包）。"""
     job = _load_job(job_id)
     if not job or not job.get("result"):
         return jsonify({"error": "任务不存在或未完成"}), 404
@@ -1222,14 +1228,11 @@ def export_videos_zip(job_id):
                 files.append((p, f"{v.get('no')}-{os.path.basename(v['file'])}"))
     if not files:
         return jsonify({"error": "该任务没有已下载的视频文件"}), 400
-    buf = _io.BytesIO()
-    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_STORED) as z:
-        for p, name in files:
-            z.write(p, name)
-    buf.seek(0)
     page = job.get("result", {}).get("page") or "reels"
-    return send_file(buf, mimetype="application/zip", as_attachment=True,
-                     download_name=f"{page}_全部视频_{len(files)}条.zip")
+    zname = f"{page}_全部视频_{len(files)}条_{uuid.uuid4().hex[:6]}.zip"
+    zpath = _build_videos_zip(files, zname)
+    return send_file(zpath, mimetype="application/zip", as_attachment=True,
+                     download_name=zname)
 
 
 @app.get("/downloads/<path:fname>")
